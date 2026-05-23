@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package audio.v1;
+
+service AudioIngestion {
+  rpc StreamAudio(stream AudioChunk) returns (StreamAck);
+}
+
+message AudioChunk {
+  string session_id = 1;
+  uint64 sequence = 2;
+  bytes audio = 3;
+  bool is_begin = 4;
+  bool is_end = 5;
+  uint32 sample_rate = 6;
+  uint64 timestamp_ms = 7;
+  string encoding = 8; // e.g. pcm_s16le
+}
+
+message StreamAck {
+  string session_id = 1;
+  uint64 received_chunks = 2;
+  uint64 received_bytes = 3;
+  string s3_key = 4;
+}

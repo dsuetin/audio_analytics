@@ -1,0 +1,13 @@
+README.md
+client/example_client.py
+docker-compose.yml
+proto/audio.proto
+requirements.txt
+storage_worker/Dockerfile
+storage_worker/__init__.py
+storage_worker/config.py
+storage_worker/events.py
+storage_worker/kafka_events.py
+storage_worker/s3_multipart.py
+storage_worker/server.py
+storage_worker/session_store.py
