@@ -68,6 +68,20 @@ services:
 
     ports:
       - "50051:50051"
+  
+  console:
+    image: docker.redpanda.com/redpandadata/console:latest
+    container_name: redpanda-console
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_BROKERS: "redpanda:9092"
+    depends_on:
+      - redpanda
+
 
 volumes:
   minio_data:
+
+
+
