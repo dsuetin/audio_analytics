@@ -1,28 +1,34 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
-
 import grpc
 
 from storage_worker.config import Settings
 from storage_worker.events import Event, now_ms
 from storage_worker.kafka_events import KafkaEventProducer
 from storage_worker.s3_multipart import S3MultipartUploader
-from storage_worker.session_store import SessionState, SessionStore
 
 import audio_pb2
 import audio_pb2_grpc
 
 
-def utc_ms() -> int:
-    return int(datetime.now(tz=timezone.utc).timestamp() * 1000)
+class SessionState:
+    def __init__(self, session_id: str, s3_key: str, upload_id: str):
+        self.session_id = session_id
+        self.s3_key = s3_key
+        self.upload_id = upload_id
+
+        self.buffer = bytearray()
+        self.part_number = 1
+        self.parts: list[dict] = []
+
+        self.received_chunks = 0
+        self.received_bytes = 0
 
 
 class AudioIngestionService(audio_pb2_grpc.AudioIngestionServicer):
     def __init__(self, settings: Settings):
         self.settings = settings
-        self.sessions = SessionStore()
 
         self.s3 = S3MultipartUploader(
             endpoint_url=settings.s3_endpoint_url,
@@ -45,7 +51,7 @@ class AudioIngestionService(audio_pb2_grpc.AudioIngestionServicer):
         print("🛑 Stopping Kafka...", flush=True)
         await self.kafka.stop()
 
-    async def _begin_session(self, session_id: str, sample_rate: int) -> SessionState:
+    async def _begin_session(self, session_id: str) -> SessionState:
         s3_key = f"audio/{session_id}.raw"
         upload_id = self.s3.create_multipart_upload(s3_key)
 
@@ -53,12 +59,9 @@ class AudioIngestionService(audio_pb2_grpc.AudioIngestionServicer):
             session_id=session_id,
             s3_key=s3_key,
             upload_id=upload_id,
-            started=True,
         )
 
-        self.sessions.add(state)
-
-        print(f"🟢 session started 🟢: {session_id}", flush=True)
+        print(f"🟢 session started: {session_id}", flush=True)
         return state
 
     async def _flush_part(self, state: SessionState) -> None:
@@ -74,7 +77,12 @@ class AudioIngestionService(audio_pb2_grpc.AudioIngestionServicer):
             body=body,
         )
 
-        state.parts.append({"ETag": etag, "PartNumber": state.part_number})
+        state.parts.append(
+            {
+                "ETag": etag,
+                "PartNumber": state.part_number,
+            }
+        )
 
         print(f"📦 part uploaded: {state.part_number}", flush=True)
 
@@ -86,13 +94,17 @@ class AudioIngestionService(audio_pb2_grpc.AudioIngestionServicer):
             if state.buffer:
                 await self._flush_part(state)
 
-            self.s3.complete_upload(state.s3_key, state.upload_id, state.parts)
+            self.s3.complete_upload(
+                state.s3_key,
+                state.upload_id,
+                state.parts,
+            )
 
             await self.kafka.send(
                 Event(
                     type="session_completed",
                     session_id=state.session_id,
-                    timestamp_ms=utc_ms(),
+                    timestamp_ms=now_ms(),
                     payload={
                         "s3_key": state.s3_key,
                         "parts": len(state.parts),
@@ -109,7 +121,7 @@ class AudioIngestionService(audio_pb2_grpc.AudioIngestionServicer):
                 Event(
                     type="session_failed",
                     session_id=state.session_id,
-                    timestamp_ms=utc_ms(),
+                    timestamp_ms=now_ms(),
                     payload={"error": str(exc)},
                 )
             )
@@ -117,32 +129,18 @@ class AudioIngestionService(audio_pb2_grpc.AudioIngestionServicer):
             print(f"❌ session failed: {exc}", flush=True)
             raise
 
-        finally:
-            self.sessions.remove(state.session_id)
-
     async def StreamAudio(self, request_iterator, context):
         active_state: SessionState | None = None
+
         received_chunks = 0
         received_bytes = 0
         final_s3_key = ""
 
         async for chunk in request_iterator:
+            session_id = chunk.session_id
 
-            session_id, created = self.sessions.get_or_create(
-                chunk.session_id or None
-            )
-
-            if chunk.is_begin or created or active_state is None:
-                active_state = await self._begin_session(
-                    session_id,
-                    chunk.sample_rate,
-                )
-
-            if active_state is None:
-                await context.abort(
-                    grpc.StatusCode.FAILED_PRECONDITION,
-                    "Session not initialized",
-                )
+            if chunk.is_begin or active_state is None:
+                active_state = await self._begin_session(session_id)
 
             active_state.buffer.extend(chunk.audio)
             active_state.received_chunks += 1
@@ -160,7 +158,7 @@ class AudioIngestionService(audio_pb2_grpc.AudioIngestionServicer):
                 active_state = None
 
         return audio_pb2.StreamAck(
-            session_id="",
+            session_id=session_id,
             received_chunks=received_chunks,
             received_bytes=received_bytes,
             s3_key=final_s3_key,
@@ -182,7 +180,6 @@ async def serve() -> None:
 
     print("🟢 gRPC server started", flush=True)
 
-    # START KAFKA AFTER GRPC IS UP (CRITICAL FIX)
     await service.start()
 
     try:
