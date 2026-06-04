@@ -9,6 +9,7 @@ __pycache__/
 
 venv/
 venv3.11/
+venv310/
 venv_proto
 .venv/
 

@@ -7,10 +7,20 @@ Mic/VAD client -> gRPC ingestion worker -> S3 multipart upload -> Kafka event lo
 ## What is included
 
 - `proto/audio.proto` — streaming contract
+- `proto/bridge.proto` — internal VAD bridge contract
 - `storage_worker/` — gRPC service that writes audio to S3 using multipart upload
 - `storage_worker/kafka_events.py` — Kafka event publisher for upload lifecycle events
 - `client/example_client.py` — example sender for raw PCM chunks
 - `docker-compose.yml` — local infrastructure for MinIO + Kafka + the worker
+
+## Proto split
+
+There are two separate protobuf contracts:
+
+- `audio.proto` is the storage contract. It is what the worker understands and what ends up in S3.
+- `bridge.proto` is the VAD-facing contract. It receives microphone chunks, runs VAD, and converts them into the storage contract.
+
+They must stay separate because the VAD bridge is intentionally a different boundary from storage. If both files share the same package and message names, Python protobuf generation can clash.
 
 ## Important design choice
 

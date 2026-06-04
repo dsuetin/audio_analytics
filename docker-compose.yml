@@ -82,6 +82,25 @@ services:
     depends_on:
       - redpanda
 
+  vad-client:
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    volumes:
+      - ./client:/app/client
+      # - ./proto:/app/proto
+    container_name: vad-client
+
+    depends_on:
+      - worker
+
+    environment:
+      STORAGE_HOST: worker:50051
+      PYTHONUNBUFFERED: 1
+
+    ports:
+      - "6000:6000"
+
 
 volumes:
   minio_data:
