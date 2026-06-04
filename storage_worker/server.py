@@ -58,20 +58,7 @@ class AudioIngestionService(audio_pb2_grpc.AudioIngestionServicer):
 
         self.sessions.add(state)
 
-        await self.kafka.send(
-            Event(
-                type="session_started",
-                session_id=session_id,
-                timestamp_ms=utc_ms(),
-                payload={
-                    "s3_key": s3_key,
-                    "sample_rate": sample_rate,
-                    "upload_id": upload_id,
-                },
-            )
-        )
-
-        print(f"🟢 session started: {session_id}", flush=True)
+        print(f"🟢 session started 🟢: {session_id}", flush=True)
         return state
 
     async def _flush_part(self, state: SessionState) -> None:
@@ -88,18 +75,6 @@ class AudioIngestionService(audio_pb2_grpc.AudioIngestionServicer):
         )
 
         state.parts.append({"ETag": etag, "PartNumber": state.part_number})
-
-        await self.kafka.send(
-            Event(
-                type="part_uploaded",
-                session_id=state.session_id,
-                timestamp_ms=utc_ms(),
-                payload={
-                    "part_number": state.part_number,
-                    "size_bytes": len(body),
-                },
-            )
-        )
 
         print(f"📦 part uploaded: {state.part_number}", flush=True)
 
@@ -209,15 +184,6 @@ async def serve() -> None:
 
     # START KAFKA AFTER GRPC IS UP (CRITICAL FIX)
     await service.start()
-
-    await service.kafka.send(
-        Event(
-            type="debug",
-            session_id="boot",
-            timestamp_ms=now_ms(),
-            payload={"msg": "worker ready"},
-        )
-    )
 
     try:
         await server.wait_for_termination()

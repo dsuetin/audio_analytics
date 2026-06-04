@@ -44,6 +44,9 @@ services:
 
   worker:
     platform: linux/amd64
+    volumes:
+      - ./storage_worker:/app/storage_worker
+      - ./proto:/app/proto
     build:
       context: .
       dockerfile: storage_worker/Dockerfile

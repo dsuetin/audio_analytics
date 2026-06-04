@@ -3,8 +3,8 @@ import grpc
 import time
 import random
 
-from generated import audio_pb2
-from generated import audio_pb2_grpc
+from generated_old import audio_pb2
+from generated_old import audio_pb2_grpc
 
 
 def make_audio_chunk(size=320):

@@ -8,6 +8,8 @@ __pycache__/
 .mypy_cache/
 
 venv/
+venv3.11/
+venv_proto
 .venv/
 
 .env
