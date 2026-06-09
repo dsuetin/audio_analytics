@@ -82,14 +82,12 @@ class AudioIngestionService(audio_pb2_grpc.AudioIngestionServicer):
     async def stop(self) -> None:
         await self.kafka.stop()
 
-        print("🛑 Stopping S3 worker...", flush=True)
         logger.info("stopping_s3_worker")
         await self.s3_queue.put(None)
 
         if self.s3_worker_task:
             await self.s3_worker_task
 
-        # print("🛑 Stopping Kafka worker...", flush=True)
         logger.info("stopping_kafka_worker")
         await self.kafka_queue.put(None)
 
@@ -100,8 +98,7 @@ class AudioIngestionService(audio_pb2_grpc.AudioIngestionServicer):
     # BACKGROUND S3 WORKER
     # ----------------------------
     async def _s3_worker(self):
-        # print("🟡 S3 worker started", flush=True)
-        logger.info("s3_worker_started")
+        logger.info("🟢 s3_worker_started")
 
         while True:
             item = await self.s3_queue.get()
@@ -125,17 +122,14 @@ class AudioIngestionService(audio_pb2_grpc.AudioIngestionServicer):
                     elapsed * 1000,
                 )
             except Exception as e:
-                # print(f"❌ S3 upload failed: {e}", flush=True)
                 logger.exception("s3_upload_failed")
 
             self.s3_queue.task_done()
 
-        # print("🔴 S3 worker stopped", flush=True)
         logger.info("s3_worker_stopped")
 
     async def _kafka_worker(self):
-        # print("🟡 Kafka worker started", flush=True)
-        logger.info("kafka_worker_started")
+        logger.info("🟢  kafka_worker_started")
 
         while True:
             event = await self.kafka_queue.get()
@@ -146,12 +140,9 @@ class AudioIngestionService(audio_pb2_grpc.AudioIngestionServicer):
             try:
                 await self.kafka.send(event)
             except Exception as e:
-                # print(f"❌ Kafka error: {e}", flush=True)
                 logger.exception("kafka_error")
 
             self.kafka_queue.task_done()
-
-        # print("🔴 Kafka worker stopped", flush=True)
         logger.info("kafka_worker_stopped")
 
     
@@ -172,9 +163,8 @@ class AudioIngestionService(audio_pb2_grpc.AudioIngestionServicer):
 
             if session_id not in self.session_chunks:
                 self.session_chunks[session_id] = 0
-                # print(f"🟢 session started: {session_id}", flush=True)
                 logger.info(
-                    "session started session_id=%s",
+                    "🟢 session started session_id=%s",
                     session_id,
                 )
 
@@ -196,16 +186,8 @@ class AudioIngestionService(audio_pb2_grpc.AudioIngestionServicer):
             # ----------------------------
             await self.s3_queue.put((s3_key, wav_data))
 
-            # print(
-            #     f"📦 queued S3 upload "
-            #     f"session={session_id} "
-            #     f"chunk={chunk_id} "
-            #     f"bytes={len(chunk.audio)}",
-            #     flush=True,
-            # )
-
             logger.info(
-                "queued_s3_upload "
+                "📦 queued_s3_upload "
                 "session_id=%s chunk_id=%s bytes=%s",
                 session_id,
                 chunk_id,
@@ -213,18 +195,6 @@ class AudioIngestionService(audio_pb2_grpc.AudioIngestionServicer):
             )
 
             kafka_started = time.perf_counter()
-            # await self.kafka.send(
-            #     Event(
-            #         type="audio_chunk_saved",
-            #         session_id=session_id,
-            #         timestamp_ms=now_ms(),
-            #         payload={
-            #             "s3_key": s3_key,
-            #             "size_bytes": len(chunk.audio),
-            #             "chunk_id": chunk_id,
-            #         },
-            #     )
-            # )
 
             await self.kafka_queue.put(
                 Event(
@@ -240,18 +210,17 @@ class AudioIngestionService(audio_pb2_grpc.AudioIngestionServicer):
             )
 
             logger.info(
-                "sending_kafka_event "
-                "session_id=%s chunk_id=%s time=%.3f",
+                "📦 sending_kafka_event "
+                "session_id=%s chunk_id=%s duration_ms=%.3f",
                 session_id,
                 chunk_id,
-                time.perf_counter() - kafka_started,
+            (time.perf_counter() - kafka_started)*1000,
             )
 
             if chunk.is_end:
                 self.session_chunks.pop(session_id, None)
-                # print(f"🏁 session ended: {session_id}", flush=True)
                 logger.info(
-                    "session ended session_id=%s",
+                    "🏁 session ended session_id=%s",
                     session_id,
                 )
 
@@ -270,8 +239,7 @@ async def serve() -> None:
     settings = Settings()
     service = AudioIngestionService(settings)
 
-    # print("🚀 WORKER BOOTING", flush=True)
-    logger.info("worker_booting")
+    logger.info("🚀 worker_booting")
     server = grpc.aio.server()
     audio_pb2_grpc.add_AudioIngestionServicer_to_server(service, server)
 
