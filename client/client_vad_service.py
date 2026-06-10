@@ -14,52 +14,62 @@ class VADGateway(bridge_pb2_grpc.AudioBridgeServicer):
     async def StreamMic(self, request_iterator, context):
         print("🔥 STREAMMIC STARTED")
 
-        session_id = None
-        chunk_seq = 0
-        forwarded_bytes = 0
+        stats = {
+            "session_id": None,
+            "chunk_seq": 0,
+            "forwarded_bytes": 0,
+        }
 
-        async for chunk in request_iterator:
-            session_id = chunk.session_id
-            chunk_seq += 1
-            forwarded_bytes += len(chunk.audio)
+        async def storage_stream():
+            async for chunk in request_iterator:
 
-            print(
-                f"📦 GOT CHUNK "
-                f"session={session_id} "
-                f"seq={chunk_seq} "
-                f"bytes={len(chunk.audio)}"
-            )
+                stats["session_id"] = chunk.session_id
+                stats["chunk_seq"] += 1
+                stats["forwarded_bytes"] += len(chunk.audio)
 
-            storage_chunk = audio_pb2.AudioChunk(
-                session_id=session_id,
-                sequence=chunk_seq,
-                audio=chunk.audio,
-                sample_rate=chunk.sample_rate,
-                is_begin=(chunk_seq == 1),
-                is_end=False,
-                timestamp_ms=0,
-                encoding="pcm_s16le",
-            )
+                chunk_seq = stats["chunk_seq"]
 
-            async def single_chunk():
-                yield storage_chunk
+                print(
+                    f"📦 GOT CHUNK "
+                    f"session={chunk.session_id} "
+                    f"seq={chunk_seq} "
+                    f"bytes={len(chunk.audio)}"
+                )
 
-            print(
-                f"➡️ FORWARD "
-                f"session={session_id} "
-                f"seq={chunk_seq}"
-            )
+                print(
+                    f"➡️ FORWARD "
+                    f"session={chunk.session_id} "
+                    f"seq={chunk_seq}"
+                )
 
-            await self.storage.StreamAudio(single_chunk())
+                yield audio_pb2.AudioChunk(
+                    session_id=chunk.session_id,
+                    sequence=chunk_seq,
+                    audio=chunk.audio,
+                    sample_rate=chunk.sample_rate,
+                    is_begin=(chunk_seq == 1),
+                    is_end=chunk.is_end,
+                    timestamp_ms=0,
+                    encoding="pcm_s16le",
+                )
 
-            if chunk.is_end:
-                break
+        storage_response = await self.storage.StreamAudio(
+            storage_stream()
+        )
+
+        print(
+            f"✅ STORAGE ACK "
+            f"session={storage_response.session_id} "
+            f"chunks={storage_response.received_chunks}"
+        )
 
         return bridge_pb2.BridgeAck(
-            session_id=session_id or "",
-            forwarded_chunks=chunk_seq,
-            forwarded_bytes=forwarded_bytes,
+            session_id=stats["session_id"] or "",
+            forwarded_chunks=stats["chunk_seq"],
+            forwarded_bytes=stats["forwarded_bytes"],
         )
+
+
 
 
 async def serve():
