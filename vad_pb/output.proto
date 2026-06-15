@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+// ==== [begin] Voice Activity [begin] ====
+// VADMark определяет разметку голосовой активности во входном акустическом сигнале.
+// Сообщение включает в себя метку времени и тип метки.
+
+message VoiceActivityMark {
+  enum VoiceActivityMarkType {
+    VA_MARK_NONE = 0;
+    VA_MARK_BEGIN = 1;
+    VA_MARK_END = 2;
+  }
+
+  VoiceActivityMarkType mark_type = 1; // тип разметки
+  uint64 offset_ms = 2; // абсолютное значение метки времени с точкой отсчета начала входного акустического сигнала, единицы измерения: миллисекунды
+}
+
+message Response {
+  repeated VoiceActivityMark va_marks = 1;
+}

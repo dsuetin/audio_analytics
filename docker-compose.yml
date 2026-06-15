@@ -1,9 +1,14 @@
+networks:
+  speech:
+    external: true
+
 services:
 
   redpanda:
     image: redpandadata/redpanda:latest
     container_name: redpanda
-
+    networks:
+      - speech
     command:
       - redpanda
       - start
@@ -26,11 +31,13 @@ services:
       - "9644:9644"   # admin API (optional)
 
   minio:
+
     image: minio/minio:latest
     container_name: minio
 
     command: server /data --console-address ":9001"
-
+    networks:
+      - speech
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
@@ -52,7 +59,8 @@ services:
       dockerfile: storage_worker/Dockerfile
 
     container_name: storage-worker
-
+    networks:
+      - speech
     depends_on:
       - redpanda
       - minio
@@ -81,7 +89,8 @@ services:
       KAFKA_BROKERS: "redpanda:9092"
     depends_on:
       - redpanda
-
+    networks:
+      - speech
   vad-client:
     build:
       context: .
@@ -90,7 +99,8 @@ services:
       - ./client:/app/client
       # - ./proto:/app/proto
     container_name: vad-client
-
+    networks:
+      - speech
     depends_on:
       - worker
 

@@ -16,7 +16,8 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 COPY client /app/client
 # COPY generated /app/generated
 COPY proto /app/proto
-
+RUN echo "copying VAD proto files"
+COPY vad_pb /app/vad_pb
 # RUN mkdir -p /app/generated && \
 #     python -m grpc_tools.protoc \
 #     -I=/app/proto \
@@ -30,6 +31,7 @@ RUN python -m grpc_tools.protoc \
     --grpc_python_out=/app \
     /app/proto/audio.proto \
     /app/proto/bridge.proto
+
 
 ENV PYTHONPATH=/app
 

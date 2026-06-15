@@ -11,7 +11,8 @@ from datetime import datetime, UTC
 
 
 SAMPLE_RATE = 16000
-CHUNK_MS = 2000
+# CHUNK_MS = 2000
+CHUNK_MS = 150
 
 audio_queue = queue.Queue()
 
@@ -69,7 +70,7 @@ def main():
     channel = grpc.insecure_channel("localhost:6000")
     stub = bridge_pb2_grpc.AudioBridgeStub(channel)
 
-    # print("🚀 streaming MIC → VAD CLIENT")
+    print("🚀 streaming MIC → VAD CLIENT")
 
     try:
         response = stub.StreamMic(mic_stream())
