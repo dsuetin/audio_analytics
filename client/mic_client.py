@@ -60,7 +60,7 @@ def mic_stream():
                 is_end=False,
             )
 
-            first_chunk = False
+        first_chunk = False
 
 
 # ----------------------------
@@ -68,9 +68,9 @@ def mic_stream():
 # ----------------------------
 def main():
     channel = grpc.insecure_channel("localhost:6000")
-    stub = bridge_pb2_grpc.AudioBridgeStub(channel)
+    stub = bridge_pb2_grpc.AudioBridgeStub(channel) 
 
-    print("🚀 streaming MIC → VAD CLIENT")
+    print("🚀 streaming MIC → VAD CLIENT") 
 
     try:
         response = stub.StreamMic(mic_stream())

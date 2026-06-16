@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import io
 import tempfile
 import wave
@@ -7,40 +5,73 @@ import argparse
 import boto3
 import simpleaudio as sa
 
-
 S3_ENDPOINT_URL = "http://localhost:9000"
 S3_ACCESS_KEY = "minioadmin"
 S3_SECRET_KEY = "minioadmin"
 S3_BUCKET = "audio-sessions"
 
 
+# ----------------------------
+# S3: pagination-safe listing
+# ----------------------------
+def list_all_objects(client, prefix: str):
+    token = None
+
+    while True:
+        if token:
+            response = client.list_objects_v2(
+                Bucket=S3_BUCKET,
+                Prefix=prefix,
+                ContinuationToken=token,
+            )
+        else:
+            response = client.list_objects_v2(
+                Bucket=S3_BUCKET,
+                Prefix=prefix,
+            )
+
+        for obj in response.get("Contents", []):
+            yield obj
+
+        if response.get("IsTruncated"):
+            token = response.get("NextContinuationToken")
+        else:
+            break
+
+
+# ----------------------------
+# find latest session_id
+# ----------------------------
 def find_latest_session(client) -> str | None:
-    response = client.list_objects_v2(
-        Bucket=S3_BUCKET,
-        Prefix="audio/",
-    )
+    objects = list(list_all_objects(client, "audio/"))
 
-    contents = response.get("Contents", [])
-
-    if not contents:
+    if not objects:
         return None
 
-    latest = max(
-        contents,
-        key=lambda obj: obj["LastModified"],
-    )
+    sessions = set()
 
-    key = latest["Key"]
+    for obj in objects:
+        key = obj["Key"]
+        parts = key.split("/")
 
-    # audio/<session_id>/000001.wav
-    parts = key.split("/")
+        # audio/<session_id>/<chunk>.wav
+        if len(parts) < 3:
+            continue
 
-    if len(parts) < 3:
+        session_id = parts[1]
+        sessions.add(session_id)
+
+    if not sessions:
         return None
 
-    return parts[1]
+    # timestamp already in session_id prefix → lexicographically sortable
+    return max(sessions)
+
+
+# ----------------------------
+# download + play session
+# ----------------------------
 def download_and_play(client: boto3.client, session_id: str) -> None:
-    
     prefix = f"audio/{session_id}/"
 
     response = client.list_objects_v2(
@@ -83,11 +114,7 @@ def download_and_play(client: boto3.client, session_id: str) -> None:
 
     merged_pcm = b"".join(pcm_parts)
 
-    with tempfile.NamedTemporaryFile(
-        suffix=".wav",
-        delete=False,
-    ) as tmp:
-
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         with wave.open(tmp, "wb") as wf:
             wf.setnchannels(channels)
             wf.setsampwidth(sample_width)
@@ -103,20 +130,21 @@ def download_and_play(client: boto3.client, session_id: str) -> None:
     play_obj.wait_done()
 
 
+# ----------------------------
+# main
+# ----------------------------
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "session_id",
-        nargs="?",
-        help="session id (default: latest session)",
-    )
+    parser.add_argument("session_id", nargs="?", help="session id (default: latest)")
+
+    args = parser.parse_args()
+
     client = boto3.client(
         "s3",
         endpoint_url=S3_ENDPOINT_URL,
         aws_access_key_id=S3_ACCESS_KEY,
         aws_secret_access_key=S3_SECRET_KEY,
     )
-    args = parser.parse_args()
 
     session_id = args.session_id
 
@@ -130,5 +158,7 @@ def main():
         print(f"Using latest session: {session_id}")
 
     download_and_play(client, session_id)
+
+
 if __name__ == "__main__":
     main()

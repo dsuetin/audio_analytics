@@ -119,14 +119,21 @@ class VADGateway(bridge_pb2_grpc.AudioBridgeServicer):
     # -------------------------
     # ENTRYPOINT
     # -------------------------
+
     async def StreamMic(self, request_iterator, context):
+        print("🔥 STREAMMIC STARTED")
 
         async def gen():
             async for chunk in self.storage_stream(request_iterator):
+                print("VAD GOT SESSION:", chunk.session_id)
+                print("➡️ TO STORAGE:", len(chunk.audio))
                 yield chunk
 
-        return await self.storage.StreamAudio(gen())
+        print("🚀 CALLING STORAGE.StreamAudio")
+        result = await self.storage.StreamAudio(gen())
+        print("✅ STORAGE FINISHED")
 
+        return result
 
 async def serve():
     channel = grpc.aio.insecure_channel("worker:50051")
