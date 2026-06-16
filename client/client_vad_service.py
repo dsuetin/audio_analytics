@@ -67,9 +67,11 @@ class VADGateway(bridge_pb2_grpc.AudioBridgeServicer):
         return Response.FromString(output)
 
     # -------------------------
-    # STREAM
+    # ENTRYPOINT
     # -------------------------
-    async def storage_stream(self, request_iterator):
+
+    async def StreamMic(self, request_iterator, context):
+
         async for chunk in request_iterator:
 
             session_id = chunk.session_id
@@ -80,6 +82,9 @@ class VADGateway(bridge_pb2_grpc.AudioBridgeServicer):
 
             audio_np = np.frombuffer(chunk.audio, dtype=np.int16).reshape(1, -1)
 
+            # -------------------------
+            # 1. VAD (async thread)
+            # -------------------------
             vad_response = await asyncio.to_thread(
                 self._run_vad,
                 audio_np,
@@ -93,15 +98,11 @@ class VADGateway(bridge_pb2_grpc.AudioBridgeServicer):
                     is_begin = True
                 elif mark.mark_type == 2:
                     is_end = True
-                mark_to_label = {
-                    0: "None",
-                    1: "Begin",
-                    2: "End",
-                }
-                label = mark_to_label[mark.mark_type]
-                print(f"{mark.offset_ms} ms -> {label}")
 
-            yield audio_pb2.AudioChunk(
+            # -------------------------
+            # 2. Prepare output chunk for S3
+            # -------------------------
+            enriched_chunk = audio_pb2.AudioChunk(
                 session_id=session_id,
                 sequence=seq,
                 audio=chunk.audio,
@@ -112,30 +113,19 @@ class VADGateway(bridge_pb2_grpc.AudioBridgeServicer):
                 encoding="pcm_s16le",
             )
 
-            # if is_end:
-            #     self.seq_map.pop(session_id, None)
-            #     break
+            # -------------------------
+            # 3. S3 WRITE
+            # -------------------------
+            await self.storage.StreamAudio(iter([enriched_chunk]))
 
-    # -------------------------
-    # ENTRYPOINT
-    # -------------------------
-
-    async def StreamMic(self, request_iterator, context):
-
-        async def gen():
-            async for chunk in self.storage_stream(request_iterator):
-                yield chunk   # VadEvent НЕ тут
-
-        # 🔥 ВАЖНО: storage stream отдельно
-        await self.storage.StreamAudio(gen())
-
-        # клиенту возвращаем поток событий
-        async for chunk in self.storage_stream(request_iterator):
+            # -------------------------
+            # 4. SEND TO CLIENT
+            # -------------------------
             yield bridge_pb2.VadEvent(
-                session_id=chunk.session_id,
-                sequence=chunk.sequence,
-                is_begin=chunk.is_begin,
-                is_end=chunk.is_end,
+                session_id=session_id,
+                sequence=seq,
+                is_begin=is_begin,
+                is_end=is_end,
             )
 
 async def serve():
