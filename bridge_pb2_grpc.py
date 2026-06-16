@@ -34,10 +34,10 @@ class AudioBridgeStub:
         Args:
             channel: A grpc.Channel.
         """
-        self.StreamMic = channel.stream_unary(
+        self.StreamMic = channel.stream_stream(
                 '/vad.bridge.v1.AudioBridge/StreamMic',
                 request_serializer=bridge__pb2.MicChunk.SerializeToString,
-                response_deserializer=bridge__pb2.BridgeAck.FromString,
+                response_deserializer=bridge__pb2.VadEvent.FromString,
                 _registered_method=True)
 
 
@@ -53,10 +53,10 @@ class AudioBridgeServicer:
 
 def add_AudioBridgeServicer_to_server(servicer, server):
     rpc_method_handlers = {
-            'StreamMic': grpc.stream_unary_rpc_method_handler(
+            'StreamMic': grpc.stream_stream_rpc_method_handler(
                     servicer.StreamMic,
                     request_deserializer=bridge__pb2.MicChunk.FromString,
-                    response_serializer=bridge__pb2.BridgeAck.SerializeToString,
+                    response_serializer=bridge__pb2.VadEvent.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -80,12 +80,12 @@ class AudioBridge:
             wait_for_ready=None,
             timeout=None,
             metadata=None):
-        return grpc.experimental.stream_unary(
+        return grpc.experimental.stream_stream(
             request_iterator,
             target,
             '/vad.bridge.v1.AudioBridge/StreamMic',
             bridge__pb2.MicChunk.SerializeToString,
-            bridge__pb2.BridgeAck.FromString,
+            bridge__pb2.VadEvent.FromString,
             options,
             channel_credentials,
             insecure,

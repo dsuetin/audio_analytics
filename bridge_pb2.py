@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0c\x62ridge.proto\x12\rvad.bridge.v1\"d\n\x08MicChunk\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\r\n\x05\x61udio\x18\x02 \x01(\x0c\x12\x13\n\x0bsample_rate\x18\x03 \x01(\r\x12\x10\n\x08is_begin\x18\x04 \x01(\x08\x12\x0e\n\x06is_end\x18\x05 \x01(\x08\"R\n\tBridgeAck\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x18\n\x10\x66orwarded_chunks\x18\x02 \x01(\x04\x12\x17\n\x0f\x66orwarded_bytes\x18\x03 \x01(\x04\x32O\n\x0b\x41udioBridge\x12@\n\tStreamMic\x12\x17.vad.bridge.v1.MicChunk\x1a\x18.vad.bridge.v1.BridgeAck(\x01\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0c\x62ridge.proto\x12\rvad.bridge.v1\"d\n\x08MicChunk\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\r\n\x05\x61udio\x18\x02 \x01(\x0c\x12\x13\n\x0bsample_rate\x18\x03 \x01(\r\x12\x10\n\x08is_begin\x18\x04 \x01(\x08\x12\x0e\n\x06is_end\x18\x05 \x01(\x08\"R\n\x08VadEvent\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x10\n\x08sequence\x18\x02 \x01(\x04\x12\x10\n\x08is_begin\x18\x03 \x01(\x08\x12\x0e\n\x06is_end\x18\x04 \x01(\x08\x32P\n\x0b\x41udioBridge\x12\x41\n\tStreamMic\x12\x17.vad.bridge.v1.MicChunk\x1a\x17.vad.bridge.v1.VadEvent(\x01\x30\x01\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -33,8 +33,8 @@ if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
   _globals['_MICCHUNK']._serialized_start=31
   _globals['_MICCHUNK']._serialized_end=131
-  _globals['_BRIDGEACK']._serialized_start=133
-  _globals['_BRIDGEACK']._serialized_end=215
+  _globals['_VADEVENT']._serialized_start=133
+  _globals['_VADEVENT']._serialized_end=215
   _globals['_AUDIOBRIDGE']._serialized_start=217
-  _globals['_AUDIOBRIDGE']._serialized_end=296
+  _globals['_AUDIOBRIDGE']._serialized_end=297
 # @@protoc_insertion_point(module_scope)

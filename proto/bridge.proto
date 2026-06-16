@@ -3,7 +3,7 @@ syntax = "proto3";
 package vad.bridge.v1;
 
 service AudioBridge {
-  rpc StreamMic(stream MicChunk) returns (BridgeAck);
+  rpc StreamMic(stream MicChunk) returns (stream VadEvent);
 }
 
 message MicChunk {
@@ -14,8 +14,9 @@ message MicChunk {
   bool is_end = 5;
 }
 
-message BridgeAck {
+message VadEvent {
   string session_id = 1;
-  uint64 forwarded_chunks = 2;
-  uint64 forwarded_bytes = 3;
+  uint64 sequence = 2;
+  bool is_begin = 3;
+  bool is_end = 4;
 }
