@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 import uuid
+from zoneinfo import ZoneInfo
 
 import grpc
 import numpy as np
@@ -28,6 +30,7 @@ class VADGateway(bridge_pb2_grpc.AudioBridgeServicer):
 
         self.seq_map = {}
         self.recording = {}
+        self.active_sessions = {}
 
     # -------------------------
     # CLEAN INFER (как working script)
@@ -75,7 +78,9 @@ class VADGateway(bridge_pb2_grpc.AudioBridgeServicer):
 
         async for chunk in request_iterator:
 
-            session_id = chunk.session_id
+            base_session_id = chunk.session_id
+            session_id = self.active_sessions.get(base_session_id)
+            
 
             audio_np = np.frombuffer(chunk.audio, dtype=np.int16).reshape(1, -1)
 
@@ -93,23 +98,32 @@ class VADGateway(bridge_pb2_grpc.AudioBridgeServicer):
             # -------------------------
             # INIT SAFETY
             # -------------------------
-            if session_id not in self.seq_map:
-                self.seq_map[session_id] = 0
+            # if session_id not in self.seq_map:
+            #     self.seq_map[session_id] = 0
 
             # -------------------------
             # STATE UPDATE FIRST
             # -------------------------
-            if is_begin:
+            if is_begin and base_session_id not in self.active_sessions:
+                session_id = (
+                    f"{datetime.now(ZoneInfo('Europe/Moscow')):%Y%m%d-%H%M%S}-"
+                    f"{base_session_id}-"
+                    f"{uuid.uuid4()}"
+                )
+
+                self.active_sessions[base_session_id] = session_id
+                self.seq_map[session_id] = 0
                 self.recording[session_id] = True
 
-            if is_end:
+            if is_end and session_id:
                 self.recording.pop(session_id, None)
                 self.seq_map.pop(session_id, None)
+                self.active_sessions.pop(base_session_id, None)
 
             # -------------------------
             # WRITE DECISION AFTER STATE UPDATE
             # -------------------------
-            if self.recording.get(session_id):
+            if self.recording.get(session_id, None) is not None:
 
                 self.seq_map[session_id] += 1
 
@@ -129,6 +143,8 @@ class VADGateway(bridge_pb2_grpc.AudioBridgeServicer):
             # -------------------------
             # CLIENT EVENT
             # -------------------------
+            if session_id not in self.seq_map:
+                session_id = "None"
             yield bridge_pb2.VadEvent(
                 session_id=session_id,
                 sequence=self.seq_map.get(session_id, 0),

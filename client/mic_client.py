@@ -14,6 +14,8 @@ import bridge_pb2_grpc
 
 SAMPLE_RATE = 16000
 CHUNK_MS = 150
+STORE_ID = 1
+WORKER_NAME = "DANIIL_SUETIN"
 
 audio_queue = queue.Queue()
 
@@ -25,7 +27,8 @@ def audio_callback(indata, frames, time, status):
 
 
 def make_session_id() -> str:
-    return f"{datetime.now(ZoneInfo('Europe/Moscow')):%Y%m%d-%H%M%S}-{uuid.uuid4()}"
+    # return f"{datetime.now(ZoneInfo('Europe/Moscow')):%Y%m%d-%H%M%S}-{uuid.uuid4()}"
+    return f"{STORE_ID}-{WORKER_NAME}"
 
 
 def mic_stream(session_id: str, stop_event: threading.Event):
