@@ -27,6 +27,7 @@ class VADGateway(bridge_pb2_grpc.AudioBridgeServicer):
         self.vad_client = grpcclient.InferenceServerClient(url=URL)
 
         self.seq_map = {}
+        self.recording = {}
 
     # -------------------------
     # CLEAN INFER (как working script)
@@ -76,19 +77,9 @@ class VADGateway(bridge_pb2_grpc.AudioBridgeServicer):
 
             session_id = chunk.session_id
 
-            self.seq_map.setdefault(session_id, 0)
-            self.seq_map[session_id] += 1
-            seq = self.seq_map[session_id]
-
             audio_np = np.frombuffer(chunk.audio, dtype=np.int16).reshape(1, -1)
 
-            # -------------------------
-            # 1. VAD (async thread)
-            # -------------------------
-            vad_response = await asyncio.to_thread(
-                self._run_vad,
-                audio_np,
-            )
+            vad_response = await asyncio.to_thread(self._run_vad, audio_np)
 
             is_begin = False
             is_end = False
@@ -100,30 +91,47 @@ class VADGateway(bridge_pb2_grpc.AudioBridgeServicer):
                     is_end = True
 
             # -------------------------
-            # 2. Prepare output chunk for S3
+            # INIT SAFETY
             # -------------------------
-            enriched_chunk = audio_pb2.AudioChunk(
-                session_id=session_id,
-                sequence=seq,
-                audio=chunk.audio,
-                sample_rate=chunk.sample_rate,
-                is_begin=is_begin,
-                is_end=is_end,
-                timestamp_ms=0,
-                encoding="pcm_s16le",
-            )
+            if session_id not in self.seq_map:
+                self.seq_map[session_id] = 0
 
             # -------------------------
-            # 3. S3 WRITE
+            # STATE UPDATE FIRST
             # -------------------------
-            await self.storage.StreamAudio(iter([enriched_chunk]))
+            if is_begin:
+                self.recording[session_id] = True
+
+            if is_end:
+                self.recording.pop(session_id, None)
+                self.seq_map.pop(session_id, None)
 
             # -------------------------
-            # 4. SEND TO CLIENT
+            # WRITE DECISION AFTER STATE UPDATE
+            # -------------------------
+            if self.recording.get(session_id):
+
+                self.seq_map[session_id] += 1
+
+                enriched_chunk = audio_pb2.AudioChunk(
+                    session_id=session_id,
+                    sequence=self.seq_map[session_id],
+                    audio=chunk.audio,
+                    sample_rate=chunk.sample_rate,
+                    is_begin=is_begin,
+                    is_end=is_end,
+                    timestamp_ms=0,
+                    encoding="pcm_s16le",
+                )
+
+                await self.storage.StreamAudio(iter([enriched_chunk]))
+
+            # -------------------------
+            # CLIENT EVENT
             # -------------------------
             yield bridge_pb2.VadEvent(
                 session_id=session_id,
-                sequence=seq,
+                sequence=self.seq_map.get(session_id, 0),
                 is_begin=is_begin,
                 is_end=is_end,
             )
