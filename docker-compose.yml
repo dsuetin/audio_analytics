@@ -124,13 +124,15 @@ services:
 
     depends_on:
       - redpanda
-      - worker   # опционально, если потом S3/события от storage важны
+      - minio
+      # - worker   # опционально, если потом S3/события от storage важны
     volumes:
       - ./client:/app/client
       - ./asr_worker:/app/asr_worker
     environment:
       KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
       KAFKA_TOPIC: audio_events
+      S3_ENDPOINT: http://minio:9000
 
       PYTHONUNBUFFERED: 1
 

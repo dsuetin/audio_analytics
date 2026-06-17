@@ -1,63 +1,52 @@
-from aiokafka import AIOKafkaConsumer
 import asyncio
-import json
 import logging
 
+from asr_worker.consumer import KafkaConsumerWrapper
+from asr_worker.s3_client import S3Client
+from asr_worker.triton_client import TritonASRClient
+
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("asr-worker")
 
 
-KAFKA_BOOTSTRAP = "redpanda:9092"
-TOPIC = "audio_events"   # твой kafka topic
+class ASRWorker:
+    def __init__(self):
+        self.s3 = S3Client(
+            endpoint="http://minio:9000",
+            key="minioadmin",
+            secret="minioadmin",
+            bucket="audio-sessions",
+        )
 
+        self.asr = TritonASRClient()
+        self.sessions = set()
 
-async def process_message(msg):
-    try:
-        event = json.loads(msg.value.decode("utf-8"))
-
+    async def handle_event(self, event: dict):
         if event.get("type") != "audio_chunk_saved":
             return
 
         session_id = event["session_id"]
-        payload = event["payload"]
+        s3_key = event["payload"]["s3_key"]
 
-        logger.info(
-            "🎧 ASR MOCK RECEIVED chunk "
-            "session_id=%s s3_key=%s chunk_id=%s",
-            session_id,
-            payload.get("s3_key"),
-            payload.get("chunk_id"),
-        )
+        audio = self.s3.get_object(s3_key)
 
-        # тут позже будет ASR inference
-        # text = await asr.infer(...)
+        if session_id not in self.sessions:
+            await self.asr.start_session(session_id)
+            self.sessions.add(session_id)
 
-    except Exception as e:
-        logger.exception("failed to process kafka message: %s", e)
+        await self.asr.send(session_id, audio)
 
 
 async def main():
-    consumer = AIOKafkaConsumer(
-        "audio_events",
-        bootstrap_servers="redpanda:9092",
-        group_id="asr-worker-debug",
-        auto_offset_reset="earliest",
-        enable_auto_commit=True,
+    worker = ASRWorker()
+
+    consumer = KafkaConsumerWrapper(
+        bootstrap="redpanda:9092",
+        topic="audio_events",
     )
 
     await consumer.start()
-    print("🚀 CONSUMER STARTED")
-
-    try:
-        async for msg in consumer:
-            print("🔥 RAW MSG RECEIVED")
-            await process_message(msg)
-
-    except Exception as e:
-        print("💥 FATAL LOOP ERROR:", e)
-
-    finally:
-        await consumer.stop()
+    print("INNER TYPE:", type(consumer._consumer))
+    await consumer.run(worker.handle_event)
 
 
 if __name__ == "__main__":
