@@ -1,3 +1,4 @@
+import sys
 import uuid
 import queue
 import threading
@@ -11,6 +12,10 @@ import sounddevice as sd
 import bridge_pb2
 import bridge_pb2_grpc
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 SAMPLE_RATE = 16000
 CHUNK_MS = 150
@@ -18,22 +23,36 @@ STORE_ID = 1
 WORKER_NAME = "DANIIL_SUETIN"
 
 audio_queue = queue.Queue()
-
+logger = logging.getLogger(__name__)
+def configure_logging() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format=(
+            "%(asctime)s "
+            "%(levelname)s "
+            "%(name)s "
+            "%(message)s"
+        ),
+        stream=sys.stdout,
+    )
+configure_logging()
 
 def audio_callback(indata, frames, time, status):
     if status:
-        print(status)
+        logger.info("Audio status=%s", status)
     audio_queue.put(indata.copy())
 
 
 def make_session_id() -> str:
-    # return f"{datetime.now(ZoneInfo('Europe/Moscow')):%Y%m%d-%H%M%S}-{uuid.uuid4()}"
     return f"{STORE_ID}-{WORKER_NAME}"
 
 
 def mic_stream(session_id: str, stop_event: threading.Event):
     blocksize = int(SAMPLE_RATE * CHUNK_MS / 1000)
-    print(f"🎤 session started: {session_id}")
+    logger.info(
+        "Session started. session_id=%s",
+        session_id,
+    )
 
     first_chunk = True
 
@@ -50,7 +69,12 @@ def mic_stream(session_id: str, stop_event: threading.Event):
             except Empty:
                 continue
 
-            print("📦 sending chunk", len(audio))
+
+            logger.debug(
+                "Chunk sent. session_id=%s samples=%s",
+                session_id,
+                len(audio),
+            )
 
             yield bridge_pb2.MicChunk(
                 session_id=session_id,
@@ -62,14 +86,17 @@ def mic_stream(session_id: str, stop_event: threading.Event):
 
             first_chunk = False
 
-    print(f"🛑 session stopped: {session_id}")
+    logger.info(
+        "Session stopped. session_id=%s",
+        session_id,
+    )
 
 
 def main():
     channel = grpc.insecure_channel("localhost:6000")
     stub = bridge_pb2_grpc.AudioBridgeStub(channel)
 
-    print("🚀 streaming MIC → VAD CLIENT")
+    logger.info("Streaming mic to vad")
 
     while True:
         session_id = make_session_id()
@@ -79,22 +106,28 @@ def main():
             stream = stub.StreamMic(mic_stream(session_id, stop_event))
 
             for msg in stream:
-                print(
-                    f"📦 seq={msg.sequence} "
-                    f"begin={msg.is_begin} "
-                    f"end={msg.is_end}"
+                logger.debug(
+                    "Chunk sent. session_id=%s seq=%s is_begin=%s is_end=%s",
+                    session_id,
+                    msg.sequence,
+                    msg.is_begin,
+                    msg.is_end,
                 )
 
                 if msg.is_begin:
-                    print("🟢 SPEECH START")
+                    logger.info(
+                        "Speech start. session_id=%s",
+                        msg.session_id,
+                    )
 
                 if msg.is_end:
-                    print("🔴 SPEECH END")
-                    stop_event.set()
-                    break
+                    logger.info(
+                        "Speech end. session_id=%s",
+                        msg.session_id,
+                    )
 
         except grpc.RpcError as e:
-            print("RPC error:", e)
+            logger.error("Grpc error. session_id=%s error=%s", session_id, e)
 
         finally:
             stop_event.set()

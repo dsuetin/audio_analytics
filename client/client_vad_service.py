@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Optional
+
 import asyncio
 from datetime import datetime
 import uuid
@@ -29,13 +31,14 @@ class VADGateway(bridge_pb2_grpc.AudioBridgeServicer):
         self.vad_client = grpcclient.InferenceServerClient(url=URL)
 
         self.seq_map = {}
+        self.triton_seq_map = {}
         self.recording = {}
         self.active_sessions = {}
 
     # -------------------------
     # CLEAN INFER (как working script)
     # -------------------------
-    def _run_vad(self, audio_np: np.ndarray):
+    def _run_vad(self, audio_np: np.ndarray, session_id: str, seq: Optional[int]) -> Response:
         threshold = np.array([[0.2]], dtype=np.float16)
         min_silence = np.array([[500]], dtype=np.int16)
         mode = np.array([[b"ONLY_SPEECH"]])
@@ -62,8 +65,8 @@ class VADGateway(bridge_pb2_grpc.AudioBridgeServicer):
             MODEL,
             infer_inputs,
             outputs=outputs,
-            sequence_id=1,          # 🔥 фиксируем (как stateless)
-            sequence_start=True,
+            sequence_id=session_id,          # 🔥 фиксируем (как stateless)
+            sequence_start=True if seq == 1 else False,  # 🔥 фиксируем (как stateless)
             sequence_end=False,
         )
 
@@ -79,12 +82,17 @@ class VADGateway(bridge_pb2_grpc.AudioBridgeServicer):
         async for chunk in request_iterator:
 
             base_session_id = chunk.session_id
-            session_id = self.active_sessions.get(base_session_id)
-            
+            triton_session_id = chunk.session_id
+
+            vad_session_id = self.active_sessions.get(base_session_id, base_session_id)
+            if triton_session_id not in self.seq_map:
+                self.triton_seq_map[triton_session_id] = 1
+            else:
+                self.triton_seq_map[triton_session_id] += 1
 
             audio_np = np.frombuffer(chunk.audio, dtype=np.int16).reshape(1, -1)
 
-            vad_response = await asyncio.to_thread(self._run_vad, audio_np)
+            vad_response = await asyncio.to_thread(self._run_vad, audio_np, triton_session_id, self.triton_seq_map.get(triton_session_id, 1))
 
             is_begin = False
             is_end = False
@@ -95,41 +103,34 @@ class VADGateway(bridge_pb2_grpc.AudioBridgeServicer):
                 elif mark.mark_type == 2:
                     is_end = True
 
-            # -------------------------
-            # INIT SAFETY
-            # -------------------------
-            # if session_id not in self.seq_map:
-            #     self.seq_map[session_id] = 0
-
-            # -------------------------
-            # STATE UPDATE FIRST
-            # -------------------------
             if is_begin and base_session_id not in self.active_sessions:
-                session_id = (
+                vad_session_id: str = (
                     f"{datetime.now(ZoneInfo('Europe/Moscow')):%Y%m%d-%H%M%S}-"
                     f"{base_session_id}-"
                     f"{uuid.uuid4()}"
                 )
 
-                self.active_sessions[base_session_id] = session_id
-                self.seq_map[session_id] = 0
-                self.recording[session_id] = True
+                self.active_sessions[base_session_id] = vad_session_id
+                self.seq_map[vad_session_id] = 0
+                self.recording[vad_session_id] = True
 
-            if is_end and session_id:
-                self.recording.pop(session_id, None)
-                self.seq_map.pop(session_id, None)
+            if is_end and vad_session_id:
+                closed_vad_session_id = vad_session_id
+                closed_vad_seq_id = self.seq_map.get(vad_session_id, 0)
+                self.recording.pop(vad_session_id, None)
+                self.seq_map.pop(vad_session_id, None)
                 self.active_sessions.pop(base_session_id, None)
 
             # -------------------------
             # WRITE DECISION AFTER STATE UPDATE
             # -------------------------
-            if self.recording.get(session_id, None) is not None:
+            if self.recording.get(vad_session_id, None) is not None:
 
-                self.seq_map[session_id] += 1
+                self.seq_map[vad_session_id] += 1
 
                 enriched_chunk = audio_pb2.AudioChunk(
-                    session_id=session_id,
-                    sequence=self.seq_map[session_id],
+                    session_id=vad_session_id,
+                    sequence=self.seq_map[vad_session_id],
                     audio=chunk.audio,
                     sample_rate=chunk.sample_rate,
                     is_begin=is_begin,
@@ -143,11 +144,13 @@ class VADGateway(bridge_pb2_grpc.AudioBridgeServicer):
             # -------------------------
             # CLIENT EVENT
             # -------------------------
-            if session_id not in self.seq_map:
-                session_id = "None"
+            if vad_session_id not in self.seq_map:
+                vad_session_id = "None"
+            event_session_id = closed_vad_session_id if is_end else vad_session_id
+            event_seq_id = closed_vad_seq_id if is_end else self.seq_map.get(vad_session_id, 0)
             yield bridge_pb2.VadEvent(
-                session_id=session_id,
-                sequence=self.seq_map.get(session_id, 0),
+                session_id=event_session_id,
+                sequence=event_seq_id,
                 is_begin=is_begin,
                 is_end=is_end,
             )
