@@ -10,7 +10,7 @@ class Settings:
     s3_bucket: str = os.getenv("S3_BUCKET", "audio-sessions")
 
     kafka_bootstrap_servers: str = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
-    kafka_events_topic: str = os.getenv("KAFKA_EVENTS_TOPIC", "audio.events")
+    kafka_events_topic: str = os.getenv("KAFKA_EVENTS_TOPIC", "audio_events")
 
     grpc_host: str = os.getenv("GRPC_HOST", "0.0.0.0")
     grpc_port: int = int(os.getenv("GRPC_PORT", "50051"))

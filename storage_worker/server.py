@@ -195,19 +195,17 @@ class AudioIngestionService(audio_pb2_grpc.AudioIngestionServicer):
             )
 
             kafka_started = time.perf_counter()
-
-            await self.kafka_queue.put(
-                Event(
-                    type="audio_chunk_saved",
-                    session_id=session_id,
-                    timestamp_ms=now_ms(),
-                    payload={
-                        "s3_key": s3_key,
-                        "size_bytes": len(chunk.audio),
-                        "chunk_id": chunk_id,
-                    },
-                )
+            event = Event(
+                type="audio_chunk_saved",
+                session_id=session_id,
+                timestamp_ms=now_ms(),
+                payload={
+                    "s3_key": s3_key,
+                    "size_bytes": len(chunk.audio),
+                    "chunk_id": chunk_id,
+                },
             )
+            await self.kafka_queue.put(event)
 
             logger.info(
                 "📦 sending_kafka_event "

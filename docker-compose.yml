@@ -25,7 +25,6 @@ services:
       - PLAINTEXT://0.0.0.0:9092
       - --advertise-kafka-addr
       - PLAINTEXT://redpanda:9092
-      - --logger-log-level=warn
       
 
     ports:
@@ -74,7 +73,7 @@ services:
       S3_BUCKET: audio-sessions
 
       KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
-      KAFKA_EVENTS_TOPIC: audio.events
+      KAFKA_EVENTS_TOPIC: audio_events
 
       GRPC_HOST: 0.0.0.0
       GRPC_PORT: 50051
@@ -113,7 +112,29 @@ services:
     ports:
       - "6000:6000"
 
+  asr_worker:
+    build:
+      context: .
+      dockerfile: asr_worker/Dockerfile
 
+    container_name: asr_worker
+
+    networks:
+      - speech
+
+    depends_on:
+      - redpanda
+      - worker   # опционально, если потом S3/события от storage важны
+    volumes:
+      - ./client:/app/client
+      - ./asr_worker:/app/asr_worker
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      KAFKA_TOPIC: audio_events
+
+      PYTHONUNBUFFERED: 1
+
+    restart: unless-stopped
 volumes:
   minio_data:
 
