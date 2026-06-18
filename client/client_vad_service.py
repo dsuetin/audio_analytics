@@ -114,18 +114,11 @@ class VADGateway(bridge_pb2_grpc.AudioBridgeServicer):
                 self.seq_map[vad_session_id] = 0
                 self.recording[vad_session_id] = True
 
-            if is_end and vad_session_id:
-                closed_vad_session_id = vad_session_id
-                closed_vad_seq_id = self.seq_map.get(vad_session_id, 0)
-                self.recording.pop(vad_session_id, None)
-                self.seq_map.pop(vad_session_id, None)
-                self.active_sessions.pop(base_session_id, None)
-
             # -------------------------
             # WRITE DECISION AFTER STATE UPDATE
             # -------------------------
             if self.recording.get(vad_session_id, None) is not None:
-
+                print("vad_session_id", vad_session_id, "is_begin", is_begin, "is_end", is_end)
                 self.seq_map[vad_session_id] += 1
 
                 enriched_chunk = audio_pb2.AudioChunk(
@@ -141,6 +134,12 @@ class VADGateway(bridge_pb2_grpc.AudioBridgeServicer):
 
                 await self.storage.StreamAudio(iter([enriched_chunk]))
 
+            if is_end and vad_session_id:
+                closed_vad_session_id = vad_session_id
+                closed_vad_seq_id = self.seq_map.get(vad_session_id, 0)
+                self.recording.pop(vad_session_id, None)
+                self.seq_map.pop(vad_session_id, None)
+                self.active_sessions.pop(base_session_id, None)
             # -------------------------
             # CLIENT EVENT
             # -------------------------
