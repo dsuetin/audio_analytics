@@ -45,7 +45,6 @@ class TritonASRClient:
 
         if seq_start:
             self.started.add(session_id)
-
         model_name = FINAL_MODEL if is_last else ONLINE_MODEL
 
         result = await self.client.infer(
@@ -56,14 +55,16 @@ class TritonASRClient:
                     "SpeechRecognitionHypothesis"
                 )
             ],
+            parameters={
+                "interim_results": True,
+                "pure_online": True,
+            },
             sequence_id=seq_id,
             sequence_start=seq_start,
             sequence_end=is_last,
         )
 
-        print("after client send")
         raw = result.as_numpy("SpeechRecognitionHypothesis")
-        print("raw result received", raw)
         if raw is None:
             return ""
         # scalar ndarray
@@ -72,19 +73,12 @@ class TritonASRClient:
         else:
             payload = raw[0]
 
-        print("raw result received", payload)
-
         if not payload:
             print("empty hypothesis received")
             return ""
 
         hyp = SpeechRecognitionHypothesis()
-        print("RAW OUTPUT:", raw)
-        print("TYPE:", type(raw))
-        print("SHAPE:", getattr(raw, "shape", None))
-        print("before parse")
         hyp.ParseFromString(payload)
-        print("after parse")
 
         return hyp.normalized_transcript or hyp.transcript
 
