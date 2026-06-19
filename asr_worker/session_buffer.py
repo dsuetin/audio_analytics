@@ -22,10 +22,8 @@ class SessionBuffer:
             state = self.buf[session_id]
             state.data.extend(data)
             state.is_end = state.is_end or is_end
-            print("add to buffer. buffer size", len(state.data))
 
     async def pop_if_ready(self, session_id: str, min_ms: int = 160) -> bytes | None:
-        print("in pop_if_ready")
         async with self.locks[session_id]:
             state = self.buf[session_id]
 
@@ -36,12 +34,10 @@ class SessionBuffer:
             target_bytes = (target_bytes // 2) * 2
 
             if available < target_bytes:
-                print("available < target_bytes")
                 return None
 
             chunk = bytes(state.data[state.cursor: state.cursor + target_bytes])
             state.cursor += target_bytes
-            print("chunk", len(chunk), "ready in buffer")
             return chunk
 
     async def is_end_ready(self, session_id: str) -> bool:
