@@ -1,39 +1,29 @@
-FROM python:3.10-slim
+FROM python:3.12-slim
 
-# -------------------------
-# system deps
-# -------------------------
-RUN apt-get update && apt-get install -y \
-    gcc \
-    g++ \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app
 
-# -------------------------
-# workdir
-# -------------------------
 WORKDIR /app
 
-# -------------------------
-# python deps
-# -------------------------
-COPY requirements.txt .
+# системные зависимости (librosa, scipy, soundfile)
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    ffmpeg \
+    libsndfile1 \
+    git \
+    && rm -rf /var/lib/apt/lists/*
 
+# upgrade pip
+RUN pip install --no-cache-dir -U pip setuptools wheel
+
+# copy requirements first
+COPY asr_worker/requirements.txt /app/requirements.txt
+
+# install python deps
 RUN pip install --no-cache-dir -r requirements.txt
 
-# -------------------------
-# source code
-# -------------------------
-COPY asr_worker/ ./asr_worker/
+# copy code
+COPY asr_worker/ /app/asr_worker/
 
-# -------------------------
-# env
-# -------------------------
-ENV PYTHONUNBUFFERED=1
-ENV PYTHONPATH=/app
-
-# -------------------------
-# run
-# -------------------------
-	
 CMD ["python", "-m", "asr_worker.main"]

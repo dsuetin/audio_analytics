@@ -26,3 +26,4 @@ minio_data/
 redpanda_data/
 
 *.log
+*.wav
