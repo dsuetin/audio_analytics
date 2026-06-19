@@ -50,31 +50,11 @@ class TritonASRClient:
         queue = self.queues[session_id]
 
         while True:
-            # item = await self.queues[session_id].get()
             item = await queue.get()
-
-            if item is None:
-                # финализация только через sequence_end
-                yield {
-                    "model_name": FINAL_MODEL,
-                    "inputs": [self._make_input(b"")],
-                    "outputs": [
-                        grpcclient.InferRequestedOutput("SpeechRecognitionHypothesis")
-                    ],
-                    "sequence_id": seq_id,
-                    "sequence_start": False,
-                    "sequence_end": True,
-                    "parameters": {
-                        "interim_results": True,
-                        "pure_online": True,
-                    },
-                }
-                break
-
             pcm, is_last = item
-            # print(f"SEND CHUNK {len(pcm)}")  # 🔥 ДОЛЖЕН БЫТЬ ВИДЕН
+
             yield {
-                "model_name": ONLINE_MODEL,   # ❗ ВСЕГДА ONLINE
+                "model_name": ONLINE_MODEL if not is_last else FINAL_MODEL,   # ❗ ВСЕГДА ONLINE
                 "inputs": [self._make_input(pcm)],
                 "outputs": [
                     grpcclient.InferRequestedOutput("SpeechRecognitionHypothesis")
@@ -84,7 +64,7 @@ class TritonASRClient:
                 "sequence_end": is_last,
                 "parameters": {
                     "interim_results": True,
-                    "pure_online": True,
+                    # "pure_online": True,
                 },
             }
 
@@ -97,18 +77,11 @@ class TritonASRClient:
         inputs_iter = self._inputs_iterator(session_id)
 
         stream = self.client.stream_infer(inputs_iterator=inputs_iter)
-        print("STREAM TYPE", type(stream))
-        print("STREAM", stream)
         self.streams[session_id] = stream
 
         self.tasks[session_id] = asyncio.create_task(
             self._consume(session_id, stream)
         )
-        # def done(t):
-        #     print("CONSUME DONE")
-        #     print("EXCEPTION =", t.exception())
-
-        # self.tasks[session_id].add_done_callback(done)
 
         return stream
 
