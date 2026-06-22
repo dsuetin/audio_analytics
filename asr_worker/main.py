@@ -143,7 +143,7 @@ class ASRWorker:
         audio = self.s3.get_object(s3_key)
         pcm = wav_to_pcm(audio)
 
-        await self.buffer.add(session_id, pcm, is_end=is_end)
+        await self.buffer.add(session_id, chunk_id, pcm, is_end=is_end)
     
         elapsed_ms = (time.perf_counter() - started) * 1000
 

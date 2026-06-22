@@ -27,3 +27,4 @@ redpanda_data/
 
 *.log
 *.wav
+*.whl
