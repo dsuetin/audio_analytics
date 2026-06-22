@@ -90,7 +90,41 @@ class ASRWorker:
                             )
 
                             continue
+                        
 
+                        if await self.buffer.is_stalled(
+                            session_id,
+                            timeout_sec=5,
+                        ):
+                            logger.error(
+                                "chunk timeout session=%s "
+                                "expected_chunk_missing",
+                                session_id,
+                            )
+
+                            final = await self.buffer.pop_all(
+                                session_id
+                            )
+
+                            if final:
+                                await self.asr.send(
+                                    session_id,
+                                    final,
+                                    is_last=True,
+                                )
+
+                            self.buffer.buf.pop(session_id, None)
+                            self.buffer.locks.pop(session_id, None)
+
+                            self.asr.started.discard(session_id)
+                            self.asr.seq_map.pop(session_id, None)
+
+                            print(
+                                f"session force closed "
+                                f"session={session_id}"
+                            )
+
+                            continue
                         # обычный streaming
                         chunk = await self.buffer.pop_if_ready(
                             session_id,

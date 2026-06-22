@@ -19,7 +19,9 @@ class BufferState:
 
     # для таймаутов в будущем
     last_activity_ts: float = field(default_factory=time.time)
-
+    
+  # ждём отсутствующий chunk
+    waiting_since_ts: float | None = None
 
 class SessionBuffer:
     def __init__(
@@ -67,6 +69,8 @@ class SessionBuffer:
             state.data.extend(data)
             state.expected_chunk_id += 1
 
+            recovered = False
+
             # подтягиваем накопившиеся чанки
             while state.expected_chunk_id in state.pending:
                 next_chunk = state.pending.pop(
@@ -75,7 +79,33 @@ class SessionBuffer:
 
                 state.data.extend(next_chunk)
                 state.expected_chunk_id += 1
+                recovered = True
 
+        # дырка закрылась
+        if recovered:
+            state.waiting_since_ts = None
+
+
+    async def is_stalled(
+        self,
+        session_id: str,
+        timeout_sec: float = 5.0,
+    ) -> bool:
+        async with self.locks[session_id]:
+            state = self.buf.get(session_id)
+
+            if state is None:
+                return False
+
+            return (
+                state.last_chunk_id is not None
+                and state.waiting_since_ts is not None
+                and (
+                    time.time() - state.waiting_since_ts
+                ) > timeout_sec
+            )
+        
+        
     async def pop_if_ready(
         self,
         session_id: str,
