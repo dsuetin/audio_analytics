@@ -44,9 +44,24 @@ class ASRWorker:
         self.asr = TritonASRClient()
         self.buffer = SessionBuffer()
 
-        # защита от параллельной обработки одной сессии
+        # защита от гонок внутри одной сессии
         self.session_locks = defaultdict(asyncio.Lock)
 
+        # активные task’и на сессии
+        self.session_tasks: dict[str, asyncio.Task] = {}
+
+    # ----------------------------
+    # async S3 wrapper (non-blocking)
+    # ----------------------------
+    async def get_s3_object(self, key: str) -> bytes:
+        return await asyncio.to_thread(
+            self.s3.get_object,
+            key,
+        )
+
+    # ----------------------------
+    # Kafka handler
+    # ----------------------------
     async def handle_event(self, event: dict):
         if event.get("type") != "audio_chunk_saved":
             return
@@ -60,11 +75,11 @@ class ASRWorker:
 
         started = time.perf_counter()
 
-        # ⚠️ S3 read (можно позже перевести в async)
-        audio = self.s3.get_object(s3_key)
+        # async S3 read (НЕ блокируем event loop)
+        audio = await self.get_s3_object(s3_key)
         pcm = wav_to_pcm(audio)
 
-        # кладём в буфер с восстановлением порядка
+        # buffer insert (ordering + reassembly)
         await self.buffer.add(
             session_id=session_id,
             chunk_id=chunk_id,
@@ -72,13 +87,13 @@ class ASRWorker:
             is_end=is_end,
         )
 
-        # запускаем обработку сессии
-        await self.process_session(session_id)
+        # dispatch session processing
+        self._schedule_session(session_id)
 
         elapsed_ms = (time.perf_counter() - started) * 1000
 
         logger.info(
-            "s3_read session_id=%s chunk_id=%s is_end=%s bytes=%s duration_ms=%.2f",
+            "s3_read session=%s chunk=%s is_end=%s bytes=%s time_ms=%.2f",
             session_id,
             chunk_id,
             is_end,
@@ -86,10 +101,23 @@ class ASRWorker:
             elapsed_ms,
         )
 
+    # ----------------------------
+    # session scheduler
+    # ----------------------------
+    def _schedule_session(self, session_id: str):
+        task = self.session_tasks.get(session_id)
+
+        if task is None or task.done():
+            task = asyncio.create_task(self.process_session(session_id))
+            self.session_tasks[session_id] = task
+
+    # ----------------------------
+    # core session processing
+    # ----------------------------
     async def process_session(self, session_id: str):
         async with self.session_locks[session_id]:
 
-            # streaming: отдаем всё что готово
+            # streaming chunks
             while True:
                 chunk = await self.buffer.pop_if_ready(
                     session_id,
@@ -100,7 +128,7 @@ class ASRWorker:
                     break
 
                 logger.info(
-                    "ASR chunk session=%s bytes=%s",
+                    "ASR stream session=%s bytes=%s",
                     session_id,
                     len(chunk),
                 )
@@ -111,7 +139,7 @@ class ASRWorker:
                     is_last=False,
                 )
 
-            # финализация
+            # finalize
             if await self.buffer.is_end_ready(session_id):
                 final = await self.buffer.pop_all(session_id)
 
@@ -127,14 +155,19 @@ class ASRWorker:
                     is_last=True,
                 )
 
-                # cleanup
+                # cleanup buffer
                 self.buffer.buf.pop(session_id, None)
                 self.buffer.locks.pop(session_id, None)
 
+                # cleanup ASR state
                 self.asr.started.discard(session_id)
                 self.asr.seq_map.pop(session_id, None)
 
+                # cleanup session state
+                self.session_tasks.pop(session_id, None)
                 self.session_locks.pop(session_id, None)
+
+                logger.info("session closed session=%s", session_id)
 
 
 async def main():
