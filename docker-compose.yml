@@ -133,12 +133,43 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
       KAFKA_TOPIC: audio_events
       S3_ENDPOINT: http://minio:9000
+      POSTGRES_DSN: postgresql://speech:speech@postgres:5432/speech_db
 
       PYTHONUNBUFFERED: 1
 
     restart: unless-stopped
+
+  postgres:
+    image: postgres:16
+    container_name: postgres
+    networks:
+      - speech
+    environment:
+      POSTGRES_USER: speech
+      POSTGRES_PASSWORD: speech
+      POSTGRES_DB: speech_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: pgadmin
+    networks:
+      - speech
+    environment:
+      PGADMIN_DEFAULT_EMAIL: suetindaniil@gmail.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    depends_on:
+      - postgres
+
+
 volumes:
   minio_data:
-
-
+  postgres_data:
 

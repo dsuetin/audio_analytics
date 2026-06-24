@@ -19,8 +19,9 @@ class TritonASRClient:
         self.streams = {}
         self.queues = defaultdict(asyncio.Queue)
         self.tasks = {}
-        self.started = set()
 
+        self.latest_text = defaultdict(str)
+        self.started = set()
         self.seq_map = {}
 
     # ----------------------------
@@ -112,8 +113,8 @@ class TritonASRClient:
             hyp.ParseFromString(payload)
 
             text = hyp.normalized_transcript or hyp.transcript
+            self.latest_text[session_id] = text
 
-            print(f"[{session_id}] ASR:", text)
 
     # ----------------------------
     # public API
@@ -121,6 +122,7 @@ class TritonASRClient:
     async def send(self, session_id: str, pcm: bytes, is_last: bool = False):
         await self._get_stream(session_id)
         await self.queues[session_id].put((pcm, is_last))
+
 
     async def finalize(self, session_id: str):
         await self.queues[session_id].put(None)

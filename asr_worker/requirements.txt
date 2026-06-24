@@ -23,3 +23,5 @@ tqdm==4.67.3
 python-dotenv==1.2.2
 
 loguru==0.7.3
+
+asyncpg==0.29.0
