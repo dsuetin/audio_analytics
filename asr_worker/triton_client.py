@@ -13,7 +13,7 @@ FINAL_MODEL = "emformer_conformer_online_finalize_tdt_punct_microphone_v1"
 
 
 class TritonASRClient:
-    def __init__(self, url="triton-asr:8001"):
+    def __init__(self, asr_events, url="triton-asr:8001"):
         self.client = grpcclient.InferenceServerClient(url=url)
 
         self.streams = {}
@@ -23,6 +23,7 @@ class TritonASRClient:
         self.latest_text = defaultdict(str)
         self.started = set()
         self.seq_map = {}
+        self.asr_events = asr_events
 
     # ----------------------------
     # utils
@@ -91,29 +92,46 @@ class TritonASRClient:
     # ----------------------------
     async def _consume(self, session_id: str, stream):
         # print("CONSUME STARTED", session_id)
-        async for response, error in stream:
-            # print("GOT RESPONSE")
-            if error:
-                print("stream error:", error)
-                continue
+        try:
+            async for response, error in stream:
+                # print("GOT RESPONSE")
+                if error:
+                    print("stream error:", error)
+                    continue
 
-            raw = response.as_numpy("SpeechRecognitionHypothesis")
-            # print(f"[{session_id}] RAW RESPONSE:", raw)
-            if raw is None:
-                # print(f"[{session_id}] EMPTY RAW")
-                continue
+                raw = response.as_numpy("SpeechRecognitionHypothesis")
+                # print(f"[{session_id}] RAW RESPONSE:", raw)
+                if raw is None:
+                    # print(f"[{session_id}] EMPTY RAW")
+                    continue
 
-            payload = raw.item() if raw.shape == () else raw[0]
-            # print(f"[{session_id}] PAYLOAD:", payload)
-            if not payload:
-                # print(f"[{session_id}] EMPTY PAYLOAD")
-                continue
+                payload = raw.item() if raw.shape == () else raw[0]
+                # print(f"[{session_id}] PAYLOAD:", payload)
+                if not payload:
+                    # print(f"[{session_id}] EMPTY PAYLOAD")
+                    continue
 
-            hyp = SpeechRecognitionHypothesis()
-            hyp.ParseFromString(payload)
+                hyp = SpeechRecognitionHypothesis()
+                hyp.ParseFromString(payload)
 
-            text = hyp.normalized_transcript or hyp.transcript
-            self.latest_text[session_id] = text
+                text = hyp.normalized_transcript or hyp.transcript
+                self.latest_text[session_id] = text
+
+                print(f"[{session_id}] ASR:", text)
+
+                await self.asr_events.put(
+                    {
+                        "session_id": session_id,
+                        "chunk_id": 0,
+                        "text": text,
+                        "is_final": True,
+                    }
+                )
+        except Exception:
+            import traceback
+            traceback.print_exc()
+
+
 
 
     # ----------------------------
