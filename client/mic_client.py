@@ -1,10 +1,7 @@
 import sys
-import uuid
 import queue
 import threading
 from queue import Empty
-from zoneinfo import ZoneInfo
-from datetime import datetime
 
 import grpc
 import sounddevice as sd
@@ -13,29 +10,33 @@ import bridge_pb2
 import bridge_pb2_grpc
 
 import logging
+import asyncio
+import json
 
+from aiokafka import AIOKafkaConsumer
+
+
+# ---------------- LOGGING ----------------
 logger = logging.getLogger(__name__)
 
+def configure_logging():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        stream=sys.stdout,
+    )
 
+configure_logging()
+
+
+# ---------------- CONFIG ----------------
 SAMPLE_RATE = 16000
 CHUNK_MS = 150
 STORE_ID = 1
 WORKER_NAME = "DANIIL_SUETIN"
 
 audio_queue = queue.Queue()
-logger = logging.getLogger(__name__)
-def configure_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format=(
-            "%(asctime)s "
-            "%(levelname)s "
-            "%(name)s "
-            "%(message)s"
-        ),
-        stream=sys.stdout,
-    )
-configure_logging()
+
 
 def audio_callback(indata, frames, time, status):
     if status:
@@ -49,10 +50,8 @@ def make_session_id() -> str:
 
 def mic_stream(session_id: str, stop_event: threading.Event):
     blocksize = int(SAMPLE_RATE * CHUNK_MS / 1000)
-    logger.info(
-        "Session started. session_id=%s",
-        session_id,
-    )
+
+    logger.info("Session started session_id=%s", session_id)
 
     first_chunk = True
 
@@ -69,13 +68,6 @@ def mic_stream(session_id: str, stop_event: threading.Event):
             except Empty:
                 continue
 
-
-            logger.debug(
-                "Chunk sent. session_id=%s samples=%s",
-                session_id,
-                len(audio),
-            )
-
             yield bridge_pb2.MicChunk(
                 session_id=session_id,
                 audio=audio.tobytes(),
@@ -86,52 +78,83 @@ def mic_stream(session_id: str, stop_event: threading.Event):
 
             first_chunk = False
 
-    logger.info(
-        "Session stopped. session_id=%s",
-        session_id,
+    logger.info("Session stopped session_id=%s", session_id)
+
+
+# ---------------- KAFKA ----------------
+
+def print_live(text: str):
+    sys.stdout.write("\r" + text + " " * 20)  # очистка хвоста
+    sys.stdout.flush()
+
+
+async def kafka_listener():
+    consumer = AIOKafkaConsumer(
+        "asr_transcripts",
+        bootstrap_servers="localhost:19092",
+        group_id="mic-client",
+        auto_offset_reset="latest",
     )
 
+    await consumer.start()
+    logger.info("Kafka consumer started")
 
-def main():
+    try:
+        async for msg in consumer:
+            raw = msg.value
+            # aiokafka может вернуть bytes или str
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8")
+
+            event = json.loads(raw)
+            print_live(
+                f"🧠 ASR [{event['session_id']}] "
+                f"final={event['is_final']} "
+                f"{event['text']}"
+            )
+
+    finally:
+        await consumer.stop()
+
+def start_kafka():
+    asyncio.run(kafka_listener())
+# ---------------- MAIN ----------------
+async def main():
+    # Kafka runs independently
+    threading.Thread(target=start_kafka, daemon=True).start()
+    
+
     channel = grpc.insecure_channel("localhost:6000")
     stub = bridge_pb2_grpc.AudioBridgeStub(channel)
 
-    logger.info("Streaming mic to vad")
+    loop = asyncio.get_running_loop()
 
     while True:
         session_id = make_session_id()
         stop_event = threading.Event()
 
+        # run gRPC stream in thread (IMPORTANT)
+        stream = await loop.run_in_executor(
+            None,
+            lambda: stub.StreamMic(mic_stream(session_id, stop_event))
+        )
+
         try:
-            stream = stub.StreamMic(mic_stream(session_id, stop_event))
-
             for msg in stream:
-                logger.debug(
-                    "Chunk sent. session_id=%s seq=%s is_begin=%s is_end=%s",
-                    session_id,
-                    msg.sequence,
-                    msg.is_begin,
-                    msg.is_end,
-                )
 
+                # ✅ VAD EVENTS
                 if msg.is_begin:
-                    logger.info(
-                        "Speech start. session_id=%s",
-                        msg.session_id,
-                    )
+                    logger.info("🎤 SPEECH START session_id=%s", msg.session_id)
 
                 if msg.is_end:
-                    logger.info(
-                        "Speech end. session_id=%s",
-                        msg.session_id,
-                    )
+                    logger.info("🛑 SPEECH END session_id=%s", msg.session_id)
 
         except grpc.RpcError as e:
-            logger.error("Grpc error. session_id=%s error=%s", session_id, e)
+            logger.error("gRPC error: %s", e)
 
         finally:
             stop_event.set()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

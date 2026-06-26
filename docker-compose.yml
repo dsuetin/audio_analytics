@@ -21,14 +21,18 @@ services:
       - 0M
       - --node-id
       - "0"
+      # INTERNAL + EXTERNAL listeners
       - --kafka-addr
-      - PLAINTEXT://0.0.0.0:9092
+      - INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:19092
+
+      # ADVERTISED ADDRESSES (самое важное место)
       - --advertise-kafka-addr
-      - PLAINTEXT://redpanda:9092
+      - INTERNAL://redpanda:9092,EXTERNAL://localhost:19092
       
 
     ports:
       - "9092:9092"
+      - "19092:19092"
       - "9644:9644"   # admin API (optional)
 
   minio:
