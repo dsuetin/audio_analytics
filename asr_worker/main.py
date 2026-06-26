@@ -76,29 +76,29 @@ class ASRWorker:
     
     async def asr_event_worker(self):
         while True:
-            print("lalala")
+
             event = await self.asr_events.get()
-            print("event111111111", event)
-            # try:
-            #     await self.producer.send(
-            #         "asr_transcripts",
-            #         {
-            #             "session_id": event["session_id"],
-            #             "chunk_id": event["chunk_id"],
-            #             "text": event["text"],
-            #             "is_final": event["is_final"],
-            #         },
-            #     )
 
-            #     await self.repo.save(
-            #         session_id=event["session_id"],
-            #         chunk_id=event["chunk_id"],
-            #         text=event["text"],
-            #         is_final=event["is_final"],
-            #     )
+            try:
+                await self.producer.send(
+                    "asr_transcripts",
+                    {
+                        "session_id": event["session_id"],
+                        "chunk_id": event["chunk_id"],
+                        "text": event["text"],
+                        "is_final": event["is_final"],
+                    },
+                )
 
-            # except Exception:
-            #     logger.exception("failed processing asr event")
+                await self.repo.save(
+                    session_id=event["session_id"],
+                    chunk_id=event["chunk_id"],
+                    text=event["text"],
+                    is_final=event["is_final"],
+                )
+
+            except Exception:
+                logger.exception("failed processing asr event")
     # ----------------------------
     # Kafka handler
     # ----------------------------
@@ -190,26 +190,6 @@ class ASRWorker:
 
 
                     print(f"Final text for session {session_id}: {text}")
-                    # await self.repo.save(
-                    #     session_id,
-                    #     chunk_id,
-                    #     text,
-                    #     True,
-                    # )
-
-                    # try:        
-                    #     await self.producer.send(
-                    #         "asr_transcripts",
-                    #         {
-                    #             "session_id": session_id,
-                    #             "text": text,
-                    #             "is_final": True,
-                    #             "chunk_id": chunk_id,
-                    #         },
-                    #     )
-                    # except Exception:
-                    #     logger.exception("FAILED TO SEND TO KAFKA")
-                    # cleanup buffer
                     self.buffer.buf.pop(session_id, None)
                     self.buffer.locks.pop(session_id, None)
 
@@ -246,20 +226,6 @@ class ASRWorker:
                 )
                 text = self.asr.latest_text[session_id]
                 
-                # try:        
-                #     await self.producer.send(
-                #         "asr_transcripts",
-                #         {
-                #             "session_id": session_id,
-                #             "text": text,
-                #             "is_final": False,
-                #             "chunk_id": chunk_id,
-                #         },
-                #     )
-                # except Exception:
-                #     logger.exception("FAILED TO SEND TO KAFKA")
-            # finalize
-            # print("before is_end_ready")
 
 
 

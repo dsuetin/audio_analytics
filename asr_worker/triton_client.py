@@ -24,6 +24,8 @@ class TritonASRClient:
         self.started = set()
         self.seq_map = {}
         self.asr_events = asr_events
+        self.chunk_ids = defaultdict(int)
+        self.is_final = defaultdict(bool)
 
     # ----------------------------
     # utils
@@ -56,7 +58,7 @@ class TritonASRClient:
             pcm, is_last = item
 
             yield {
-                "model_name": ONLINE_MODEL if not is_last else FINAL_MODEL,   # ❗ ВСЕГДА ONLINE
+                "model_name": ONLINE_MODEL if not is_last else FINAL_MODEL,
                 "inputs": [self._make_input(pcm)],
                 "outputs": [
                     grpcclient.InferRequestedOutput("SpeechRecognitionHypothesis")
@@ -122,9 +124,9 @@ class TritonASRClient:
                 await self.asr_events.put(
                     {
                         "session_id": session_id,
-                        "chunk_id": 0,
+                        "chunk_id": self.chunk_ids[session_id],
                         "text": text,
-                        "is_final": True,
+                        "is_final": self.is_final[session_id],
                     }
                 )
         except Exception:
@@ -139,6 +141,8 @@ class TritonASRClient:
     # ----------------------------
     async def send(self, session_id: str, pcm: bytes, is_last: bool = False):
         await self._get_stream(session_id)
+        self.chunk_ids[session_id] += 1
+        self.is_final[session_id] = is_last
         await self.queues[session_id].put((pcm, is_last))
 
 
@@ -153,3 +157,5 @@ class TritonASRClient:
         self.streams.pop(session_id, None)
         self.queues.pop(session_id, None)
         self.tasks.pop(session_id, None)
+        self.chunk_ids.pop(session_id, None)
+        self.is_final.pop(session_id, None)
