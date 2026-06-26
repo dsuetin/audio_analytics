@@ -92,7 +92,6 @@ class ASRWorker:
 
                 await self.repo.save(
                     session_id=event["session_id"],
-                    chunk_id=event["chunk_id"],
                     text=event["text"],
                     is_final=event["is_final"],
                 )
