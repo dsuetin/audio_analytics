@@ -173,40 +173,40 @@ services:
     depends_on:
       - postgres
 
-    # asr:
-    #   image: asr_emformer_mic_cpu:1.0.0
-    #   container_name: triton-asr
-    #   networks:
-    #     - speech
+  asr:
+    image: asr_emformer_mic_cpu:1.0.0
+    container_name: triton-asr
+    networks:
+      - speech
 
-  # vad:
-  #   platform: linux/amd64
-  #   image: vad_server:latest
-  #   networks:
-  #     - speech
-  #   container_name: server_triton-speech-segmentation
-  #   ulimits:
-  #     memlock: -1
-  #     stack: -1
-  #   shm_size: 4g
-  #   working_dir: /mnt
-  #   ports:
-  #   - "8001:8001"
+  vad:
+    platform: linux/amd64
+    image: vad_server:latest
+    networks:
+      - speech
+    container_name: server_triton-speech-segmentation
+    ulimits:
+      memlock: -1
+      stack: -1
+    shm_size: 4g
+    working_dir: /mnt
+    ports:
+    - "8001:8001"
 
-  #   environment:
-  #     TRITON_PARAMETERS: >
-  #       --model-config-name=cpu
-  #       --model-control-mode=explicit
-  #       --load-model marblenet
-  #       --load-model online_vad
-  #       --load-model offline_vad
+    environment:
+      TRITON_PARAMETERS: >
+        --model-config-name=cpu
+        --model-control-mode=explicit
+        --load-model marblenet
+        --load-model online_vad
+        --load-model offline_vad
 
-  #     TRITON_SERVER_ARGS: >
-  #       --model-repository=/mnt/models
-  #       --backend-config=onnxruntime,intra_op_thread_count=1
-  #       --backend-config=onnxruntime,inter_op_thread_count=1
-  #       --backend-config=onnxruntime,execution_mode=1
-  #       --backend-config=onnxruntime,enable-global-threadpool=1
+      TRITON_SERVER_ARGS: >
+        --model-repository=/mnt/models
+        --backend-config=onnxruntime,intra_op_thread_count=1
+        --backend-config=onnxruntime,inter_op_thread_count=1
+        --backend-config=onnxruntime,execution_mode=1
+        --backend-config=onnxruntime,enable-global-threadpool=1
 
 
 

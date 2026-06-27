@@ -81,10 +81,20 @@ def mic_stream(session_id: str, stop_event: threading.Event):
     logger.info("Session stopped session_id=%s", session_id)
 
 
+
+def log_event(message: str, session_id: str):
+    # если сейчас рисуется "живая" строка ASR,
+    # сначала завершаем ее переводом строки
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+
+    logger.info("%s %s", message, session_id)
+
 # ---------------- KAFKA ----------------
 
 def print_live(text: str):
-    sys.stdout.write("\r" + text + " " * 20)  # очистка хвоста
+    sys.stdout.write("\r\033[2K")   # очистить текущую строку
+    sys.stdout.write(text)
     sys.stdout.flush()
 
 
@@ -107,11 +117,17 @@ async def kafka_listener():
                 raw = raw.decode("utf-8")
 
             event = json.loads(raw)
-            print_live(
-                f"🧠 ASR [{event['session_id']}] "
-                f"final={event['is_final']} "
-                f"{event['text']}"
-            )
+            if event["is_final"]:
+                icon = "🏁"   # клетчатый флаг
+                print_live(
+                   f"{icon} {event['session_id']}: {event['text']}"
+                )
+                print()
+            else:
+                icon = "⌨️"   # печатная машинка
+                print_live(
+                   f"{icon} {event['session_id']}: {event['text']}"
+                )
 
     finally:
         await consumer.stop()
@@ -144,10 +160,10 @@ async def main():
 
                 # ✅ VAD EVENTS
                 if msg.is_begin:
-                    logger.info("🎤 SPEECH START session_id=%s", msg.session_id)
+                    log_event("🟢 SPEECH START", msg.session_id)
 
                 if msg.is_end:
-                    logger.info("🛑 SPEECH END session_id=%s", msg.session_id)
+                    log_event("🔴 SPEECH END  ", msg.session_id)
 
         except grpc.RpcError as e:
             logger.error("gRPC error: %s", e)
