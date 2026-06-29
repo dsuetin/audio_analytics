@@ -208,7 +208,30 @@ services:
         --backend-config=onnxruntime,execution_mode=1
         --backend-config=onnxruntime,enable-global-threadpool=1
 
+  classification_service:
+    build:
+      context: .
+      dockerfile: classification/Dockerfile
 
+    container_name: classification-service
+
+    networks:
+      - speech
+
+    depends_on:
+      - redpanda
+
+    volumes:
+      - ./classification:/app/classification
+
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      KAFKA_INPUT_TOPIC: asr_transcripts
+      KAFKA_OUTPUT_TOPIC: classified_events
+
+      PYTHONUNBUFFERED: 1
+
+    restart: unless-stopped
 
 volumes:
   minio_data:

@@ -47,6 +47,12 @@ KAFKA_TOPIC = "asr_transcripts"
 GRPC_ADDR = "localhost:6000"
 
 
+# ---------------- SYNC ----------------
+
+last_session_id = None
+last_session_finished = threading.Event()
+
+
 # ---------------- WAV ----------------
 
 
@@ -121,6 +127,8 @@ def log_event(message: str, session_id: str):
 
 
 async def kafka_listener():
+    global last_session_id
+
     consumer = AIOKafkaConsumer(
         KAFKA_TOPIC,
         bootstrap_servers=KAFKA_BOOTSTRAP,
@@ -147,6 +155,8 @@ async def kafka_listener():
                 )
                 print()
 
+                last_session_finished.set()
+
             else:
                 print_live(
                     f"⌨️ {event['session_id']}: {event['text']}"
@@ -164,10 +174,14 @@ def start_kafka():
 
 
 def process_file(path: Path):
+    global last_session_id
 
     pcm = load_wav(path)
 
     session_id = make_session_id(path.name)
+
+    last_session_id = session_id
+    last_session_finished.clear()
 
     print()
     print("=" * 70)
@@ -192,6 +206,10 @@ def process_file(path: Path):
 
     except grpc.RpcError as e:
         logger.error("gRPC error: %s", e)
+
+    logger.info("Waiting final ASR...")
+    last_session_finished.wait()
+    logger.info("Final ASR received")
 
 
 def main():
