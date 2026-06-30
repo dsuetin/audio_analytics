@@ -1,44 +1,72 @@
 from collections import Counter
 
-from .policy import BUY_KEYWORDS, RETURN_KEYWORDS, SERVICE_KEYWORDS
+from .policy import (
+    BUY_KEYWORDS,
+    RETURN_KEYWORDS,
+    SERVICE_KEYWORDS,
+)
 
 
-def update(state, text: str, is_final: bool):
+def update(client_state, session_state, text, is_final):
 
-    words = text.lower().split()
+    words = Counter(text.lower().split())
 
+    #
+    # partial всегда заменяем
+    #
+    session_state.partial = words
+
+    #
+    # рабочая гистограмма
+    #
+    session_state.working = (
+        client_state.confirmed +
+        session_state.partial
+    )
+
+    #
+    # финал переносим в клиента
+    #
     if is_final:
-        # подтверждаем последнюю гипотезу
-        state.confirmed += state.last_partial
-        state.last_partial = Counter()
-    else:
-        # заменяем предыдущую гипотезу
-        state.last_partial = Counter(words)
 
-    state.working = state.confirmed + state.last_partial
+        client_state.confirmed += session_state.partial
+
+        session_state.partial = Counter()
+
+        session_state.working = (
+            client_state.confirmed.copy()
+        )
 
 
-def score(state):
+def score(histogram: Counter):
 
-    buy = sum(
-        c for w, c in state.working.items()
-        if w in BUY_KEYWORDS
-    )
+    print("\n========== HISTOGRAM ==========")
 
-    ret = sum(
-        c for w, c in state.working.items()
-        if w in RETURN_KEYWORDS
-    )
+    for word, count in histogram.most_common():
+        print(f"{word:20} {count}")
 
-    svc = sum(
-        c for w, c in state.working.items()
-        if w in SERVICE_KEYWORDS
-    )
+    print("===============================\n")
+
+    buy = 0
+    ret = 0
+    svc = 0
+
+    for word, count in histogram.items():
+
+        if word in BUY_KEYWORDS:
+            buy += count
+
+        if word in RETURN_KEYWORDS:
+            ret += count
+
+        if word in SERVICE_KEYWORDS:
+            svc += count
 
     return buy, ret, svc
 
 
 def best_label(buy, ret, svc):
+
     scores = {
         "buy": buy,
         "return": ret,
@@ -51,4 +79,5 @@ def best_label(buy, ret, svc):
 
 
 def threshold_hit(buy, ret, svc):
+
     return max(buy, ret, svc) >= 5

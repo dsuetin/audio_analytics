@@ -5,7 +5,7 @@ import os
 
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 
-from .state import SessionState
+from .state import StateManager
 from .classifier import (
     update,
     score,
@@ -42,7 +42,8 @@ class ClassificationService:
         self.consumer = None
         self.producer = None
 
-        self.sessions: dict[str, SessionState] = {}
+        # self.sessions: dict[str, SessionState] = {}
+        self.state = StateManager()
 
     async def start(self):
 
@@ -65,12 +66,6 @@ class ClassificationService:
 
         logger.info("🔥 CLASSIFICATION STARTED")
 
-    def get_state(self, session_id: str) -> SessionState:
-
-        if session_id not in self.sessions:
-            self.sessions[session_id] = SessionState()
-
-        return self.sessions[session_id]
 
     async def emit(
         self,
@@ -112,20 +107,27 @@ class ClassificationService:
         text = event.get("text", "")
         is_final = event.get("is_final", False)
 
-        state = self.get_state(session_id)
+        session_state = self.state.session(session_id)
+        client_state = self.state.client("SUETIN_DANIIL")
 
-        buy, ret, svc = score(state)
-        print("before = ", text, buy, ret, svc)
+        # buy, ret, svc = score(state)
+
+        print("\nCONFIRMED:")
+        buy, ret, svc = score(client_state.confirmed)
+        print("client buy, ret, svc", buy, ret, svc)
+        print("\nWORKING:")
+        buy, ret, svc = score(session_state.working)
+        print("session buy, ret, svc", buy, ret, svc)
         #
         # обновляем гистограмму
         #
-        update(state, text, is_final)
+        update(client_state, session_state, text, is_final)
 
         #
         # считаем веса
         #
-        buy, ret, svc = score(state)
-        print("text after update = ", text, buy, ret, svc)
+        # buy, ret, svc = score(state)
+        # print("text after update = ", text, buy, ret, svc)
         label, score_value = best_label(
             buy,
             ret,
@@ -146,7 +148,7 @@ class ClassificationService:
         #
         if (
             threshold_hit(buy, ret, svc)
-            and not state.threshold_sent
+            and not self.state.threshold_sent
         ):
             print("emit", session_id, text, label, "threshold", buy, ret, svc,)
             await self.emit(
@@ -159,31 +161,31 @@ class ClassificationService:
                 svc,
             )
 
-            state.threshold_sent = True
+            self.state.threshold_sent = True
 
         #
         # смена сценария
         #
-        if (
-            state.last_label is None
-            or (
-                label != state.last_label
-                and score_value >= state.last_score
-            )
-        ):
+        # if (
+        #     self.state.last_label is None
+        #     or (
+        #         label != self.state.last_label
+        #         and score_value >= self.state.last_score
+        #     )
+        # ):
 
-            await self.emit(
-                session_id,
-                text,
-                label,
-                "switch",
-                buy,
-                ret,
-                svc,
-            )
+        #     await self.emit(
+        #         session_id,
+        #         text,
+        #         label,
+        #         "switch",
+        #         buy,
+        #         ret,
+        #         svc,
+        #     )
 
-            state.last_label = label
-            state.last_score = score_value
+        #     self.state.last_label = label
+        #     self.state.last_score = score_value
 
         #
         # финальное сообщение ASR
@@ -203,7 +205,7 @@ class ClassificationService:
             #
             # следующая волна threshold
             #
-            state.threshold_sent = False
+            self.state.threshold_sent = False
 
     async def run(self):
 
