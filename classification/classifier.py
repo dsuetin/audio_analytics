@@ -29,9 +29,9 @@ def update(client_state, session_state, text, is_final):
     #
     if is_final:
 
-        client_state.confirmed += session_state.partial
+        client_state.confirmed += words
 
-        session_state.partial = Counter()
+        session_state.partial.clear()
 
         session_state.working = (
             client_state.confirmed.copy()
