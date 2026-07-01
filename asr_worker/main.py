@@ -78,6 +78,7 @@ class ASRWorker:
         while True:
 
             event = await self.asr_events.get()
+            # print("Processing ASR event:", event)
 
             try:
                 await self.producer.send(
@@ -185,10 +186,7 @@ class ASRWorker:
                         final,
                         is_last=True,
                     )
-                    text = self.asr.latest_text[session_id]
 
-
-                    print(f"Final text for session {session_id}: {text}")
                     self.buffer.buf.pop(session_id, None)
                     self.buffer.locks.pop(session_id, None)
 
@@ -223,7 +221,7 @@ class ASRWorker:
                     chunk,
                     is_last=False,
                 )
-                text = self.asr.latest_text[session_id]
+
                 
 
 

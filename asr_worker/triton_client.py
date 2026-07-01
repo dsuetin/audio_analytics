@@ -18,6 +18,7 @@ class TritonASRClient:
 
         self.streams = {}
         self.queues = defaultdict(asyncio.Queue)
+        # self.pending = defaultdict(asyncio.Queue)
         self.tasks = {}
 
         self.latest_text = defaultdict(str)
@@ -25,7 +26,6 @@ class TritonASRClient:
         self.seq_map = {}
         self.asr_events = asr_events
         self.chunk_ids = defaultdict(int)
-        self.is_final = defaultdict(bool)
 
     # ----------------------------
     # utils
@@ -56,7 +56,7 @@ class TritonASRClient:
         while True:
             item = await queue.get()
             pcm, is_last = item
-
+            # print(f"[{session_id}] Got chunk from queue, is_last={is_last}, bytes={len(pcm)}")
             yield {
                 "model_name": ONLINE_MODEL if not is_last else FINAL_MODEL,
                 "inputs": [self._make_input(pcm)],
@@ -95,12 +95,22 @@ class TritonASRClient:
     async def _consume(self, session_id: str, stream):
         # print("CONSUME STARTED", session_id)
         try:
+            chunk_id = 0
             async for response, error in stream:
                 # print("GOT RESPONSE")
                 if error:
                     print("stream error:", error)
                     continue
+                # print("response22222", response)
+                # print(response._result)
 
+                params = response._result.parameters
+
+                if "sequence_end" in params:
+                    is_final = params["sequence_end"].bool_param
+                else:
+                    is_final = False
+                chunk_id += 1
                 raw = response.as_numpy("SpeechRecognitionHypothesis")
                 # print(f"[{session_id}] RAW RESPONSE:", raw)
                 if raw is None:
@@ -119,14 +129,14 @@ class TritonASRClient:
                 text = hyp.normalized_transcript or hyp.transcript
                 self.latest_text[session_id] = text
 
-                print(f"[{session_id}] ASR:", text)
-
+                # print(f"[{session_id}] ASR:", text)
+                # print(f"[{session_id}] ASR chunk_id={chunk_id}, is_final={is_final}, text={text}")
                 await self.asr_events.put(
                     {
                         "session_id": session_id,
-                        "chunk_id": self.chunk_ids[session_id],
+                        "chunk_id": chunk_id,
                         "text": text,
-                        "is_final": self.is_final[session_id],
+                        "is_final": is_final,
                     }
                 )
         except Exception:
@@ -142,7 +152,6 @@ class TritonASRClient:
     async def send(self, session_id: str, pcm: bytes, is_last: bool = False):
         await self._get_stream(session_id)
         self.chunk_ids[session_id] += 1
-        self.is_final[session_id] = is_last
         await self.queues[session_id].put((pcm, is_last))
 
 
@@ -158,4 +167,3 @@ class TritonASRClient:
         self.queues.pop(session_id, None)
         self.tasks.pop(session_id, None)
         self.chunk_ids.pop(session_id, None)
-        self.is_final.pop(session_id, None)
