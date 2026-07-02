@@ -11,31 +11,11 @@ def update(client_state, session_state, text, is_final):
 
     words = Counter(text.lower().split())
 
-    #
-    # partial всегда заменяем
-    #
     session_state.partial = words
 
-    #
-    # рабочая гистограмма
-    #
-    session_state.working = (
-        client_state.confirmed +
-        session_state.partial
-    )
-
-    #
-    # финал переносим в клиента
-    #
     if is_final:
-
         client_state.confirmed += words
-
         session_state.partial.clear()
-
-        session_state.working = (
-            client_state.confirmed.copy()
-        )
 
 
 def score(histogram: Counter):

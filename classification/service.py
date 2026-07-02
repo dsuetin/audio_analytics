@@ -117,19 +117,22 @@ class ClassificationService:
         session_state = self.state.session(session_id)
         client_state = self.state.client("SUETIN_DANIIL")
 
-        # buy, ret, svc = score(state)
-
+        if is_final:
+            self.state.active_sessions.discard(session_id)
+        else:
+            self.state.active_sessions.add(session_id)
 
         #
         # обновляем гистограмму
         #
         update(client_state, session_state, text, is_final)
+        working = client_state.confirmed.copy()
 
-        print("\nCONFIRMED:")
-        buy, ret, svc = score(client_state.confirmed)
-        print("client buy, ret, svc", buy, ret, svc)
+        for sid in self.state.active_sessions:
+            working += self.state.session(sid).partial
+
         print("\nWORKING:")
-        buy, ret, svc = score(session_state.working)
+        buy, ret, svc = score(working)
         print("session buy, ret, svc", buy, ret, svc)
 
         #
@@ -179,7 +182,7 @@ class ClassificationService:
         
         # смена сценария
         
-        if label != self.state.last_label and score_value >= self.state.last_score:
+        if label != self.state.last_label and score_value > self.state.last_score:
 
             await self.emit(
                 session_id,

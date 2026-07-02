@@ -11,6 +11,7 @@ class StateManager:
         self.last_label = None
         self.last_score = 0
         self.threshold_sent = False
+        self.active_sessions: set[str] = set()
 
     def client(self, client_id):
 
