@@ -97,6 +97,34 @@ def print_live(text: str):
     sys.stdout.write(text)
     sys.stdout.flush()
 
+client_sessions = []
+client_sessions.append(None)
+
+async def classification_listener():
+    consumer = AIOKafkaConsumer(
+        "classified_events",
+        bootstrap_servers="localhost:19092",
+        group_id="mic-client-classification",
+        auto_offset_reset="latest",
+    )
+
+    await consumer.start()
+
+    try:
+        async for msg in consumer:
+
+            print("66666", msg)
+            raw = msg.value
+            if isinstance(raw, bytes):
+                raw = raw.decode()
+
+            event = json.loads(raw)
+            client_sessions[-1] = event["label"]
+
+    finally:
+        await consumer.stop()
+
+
 
 async def kafka_listener():
     consumer = AIOKafkaConsumer(
@@ -108,9 +136,23 @@ async def kafka_listener():
 
     await consumer.start()
     logger.info("Kafka consumer started")
+    "🛍️"
+    "🔋"
+    "🛠️"
+    "💵"
+    "🚨"
+
+
 
     try:
         async for msg in consumer:
+            class_icon = ""
+            if client_sessions[-1] == "buy":
+                class_icon = "🛍️"   # пакет покупок
+            elif client_sessions[-1] == "service":
+                class_icon = "🛠️"   # инструмент
+            elif client_sessions[-1] == "return":
+                class_icon = "📦"   # инструмент
             raw = msg.value
             # aiokafka может вернуть bytes или str
             if isinstance(raw, bytes):
@@ -120,13 +162,13 @@ async def kafka_listener():
             if event["is_final"]:
                 icon = "🏁"   # клетчатый флаг
                 print_live(
-                   f"{icon} {event['session_id']}: {event['text']}"
+                   f"{class_icon} {icon} {event['session_id']}: {event['text']}"
                 )
                 print()
             else:
-                icon = "⌨️"   # печатная машинка
+                icon = "🖨️"   # печатная машинка
                 print_live(
-                   f"{icon} {event['session_id']}: {event['text']}"
+                   f"{class_icon} {icon} {event['session_id']}: {event['text']}"
                 )
 
     finally:
@@ -134,10 +176,14 @@ async def kafka_listener():
 
 def start_kafka():
     asyncio.run(kafka_listener())
+
+def start_classification():
+    asyncio.run(classification_listener())
 # ---------------- MAIN ----------------
 async def main():
     # Kafka runs independently
     threading.Thread(target=start_kafka, daemon=True).start()
+    threading.Thread(target=start_classification, daemon=True).start()
     
 
     channel = grpc.insecure_channel("localhost:6000")
