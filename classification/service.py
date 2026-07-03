@@ -4,7 +4,7 @@ import logging
 import os
 
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
-# from zope import event
+import asyncpg
 
 from .state import StateManager
 from .classifier import (
@@ -13,6 +13,7 @@ from .classifier import (
     best_label,
     threshold_hit,
 )
+from .dialog_sessions import DialogSession
 
 logger = logging.getLogger(__name__)
 
@@ -43,9 +44,12 @@ class ClassificationService:
         self.consumer = None
         self.producer = None
 
+        self.db = None
+
 
         # self.sessions: dict[str, SessionState] = {}
         self.state = StateManager()
+        self.dialog = DialogSession()
 
     async def start(self):
 
@@ -66,6 +70,14 @@ class ClassificationService:
         print("before producer start")
         await self.producer.start()
 
+        print("before db connect")
+        self.db = await asyncpg.connect(
+            host=os.getenv("POSTGRES_HOST", "postgres"),
+            port=int(os.getenv("POSTGRES_PORT", 5432)),
+            user=os.getenv("POSTGRES_USER", "speech"),
+            password=os.getenv("POSTGRES_PASSWORD", "speech"),
+            database=os.getenv("POSTGRES_DB", "speech_db"),
+        )
         logger.info("🔥 CLASSIFICATION STARTED")
 
 
@@ -114,8 +126,29 @@ class ClassificationService:
         chunk_id = event.get("chunk_id")
         is_final = event.get("is_final", False)
 
+
         session_state = self.state.session(session_id)
-        client_state = self.state.client("SUETIN_DANIIL")
+        client_id = f"client_{len(self.state.clients)}"
+        print("client_id", client_id)
+        if not len(self.state.clients):
+            client_id = f"client_{len(self.state.clients)+1}"
+            await self.producer.send_and_wait("new_client_session", json.dumps({"type": "new_session"}).encode())
+            await self.save_client_id(session_id, client_id)
+        client_state = self.state.client(client_id)
+        
+        new_session = self.dialog.process(text, is_final)
+
+        if new_session:
+
+            print("\n========== NEW CLIENT ==========\n")
+            client_id = f"client_{len(self.state.clients)+1}"
+            client_state = self.state.client(client_id)
+            await self.save_client_id(session_id, client_id)
+            self.state.threshold_sent = False
+            self.state.last_label = None
+            self.state.last_score = 0
+            await self.producer.send_and_wait("new_client_session", json.dumps({"type": "new_session"}).encode()
+        )
 
         if is_final:
             self.state.active_sessions.discard(session_id)
@@ -135,16 +168,13 @@ class ClassificationService:
         buy, ret, svc = score(working)
         print("session buy, ret, svc", buy, ret, svc)
 
-        #
-        # считаем веса
-        #
-        # buy, ret, svc = score(state)
-        # print("text after update = ", text, buy, ret, svc)
         label, score_value = best_label(
             buy,
             ret,
             svc,
         )
+
+        print("best label", label, score_value)
 
         logger.info(
             "session=%s buy=%s return=%s service=%s label=%s",
@@ -155,9 +185,7 @@ class ClassificationService:
             label,
         )
 
-        #
         # threshold
-        #
         if (
             threshold_hit(buy, ret, svc)
             and not self.state.threshold_sent
@@ -178,6 +206,7 @@ class ClassificationService:
             self.state.threshold_sent = True
             self.state.last_label = label
             self.state.last_score = score_value
+            await self.save_dialog_type(session_id, label)
 
         
         # смена сценария
@@ -198,9 +227,33 @@ class ClassificationService:
 
             self.state.last_label = label
             self.state.last_score = score_value
+            await self.save_dialog_type(session_id, label)
+
+        
 
 
+    async def save_dialog_type(self, session_id: str, dialog_type: str):
+        await self.db.execute(
+            """
+            UPDATE transcripts
+            SET dialog_type = $2
+            WHERE session_id = $1
+            """,
+            session_id,
+            dialog_type,
+        )
 
+        
+    async def save_client_id(self, session_id: str, client_id: str):
+        await self.db.execute(
+            """
+            UPDATE transcripts
+            SET client_id = $2
+            WHERE session_id = $1
+            """,
+            session_id,
+            client_id,
+        )    
     async def run(self):
 
         await self.start()
@@ -217,6 +270,11 @@ class ClassificationService:
 
             if self.producer:
                 await self.producer.stop()
+
+            if self.db:
+                await self.db.close()
+
+            
 
 
 def main():

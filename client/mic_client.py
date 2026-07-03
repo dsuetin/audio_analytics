@@ -113,7 +113,6 @@ async def classification_listener():
     try:
         async for msg in consumer:
 
-            print("66666", msg)
             raw = msg.value
             if isinstance(raw, bytes):
                 raw = raw.decode()
@@ -124,6 +123,29 @@ async def classification_listener():
     finally:
         await consumer.stop()
 
+
+async def new_client_session_listener():
+    consumer = AIOKafkaConsumer(
+        "new_client_session",
+        bootstrap_servers="localhost:19092",
+        group_id="mic-new-client-session",
+        auto_offset_reset="latest",
+    )
+
+    await consumer.start()
+
+    try:
+        async for msg in consumer:
+
+            raw = msg.value
+            if isinstance(raw, bytes):
+                raw = raw.decode()
+
+            event = json.loads(raw)
+            client_sessions.append(None)
+
+    finally:
+        await consumer.stop()
 
 
 async def kafka_listener():
@@ -153,6 +175,7 @@ async def kafka_listener():
                 class_icon = "🛠️"   # инструмент
             elif client_sessions[-1] == "return":
                 class_icon = "📦"   # инструмент
+
             raw = msg.value
             # aiokafka может вернуть bytes или str
             if isinstance(raw, bytes):
@@ -179,11 +202,16 @@ def start_kafka():
 
 def start_classification():
     asyncio.run(classification_listener())
+
+def start_new_client_session_classification():
+    asyncio.run(new_client_session_listener())
+
 # ---------------- MAIN ----------------
 async def main():
     # Kafka runs independently
     threading.Thread(target=start_kafka, daemon=True).start()
     threading.Thread(target=start_classification, daemon=True).start()
+    threading.Thread(target=start_new_client_session_classification, daemon=True).start()
     
 
     channel = grpc.insecure_channel("localhost:6000")
