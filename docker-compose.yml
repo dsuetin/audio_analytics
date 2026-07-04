@@ -240,6 +240,42 @@ services:
 
     restart: unless-stopped
 
+  alert_service:
+    build:
+      context: .
+      dockerfile: alert_service/Dockerfile
+
+    container_name: alert-service
+
+    networks:
+      - speech
+
+    depends_on:
+      - redpanda
+      - postgres
+
+    volumes:
+      - ./alert_service:/app/alert_service
+
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+
+      KAFKA_INPUT_TOPIC: asr_transcripts
+      KAFKA_ALERT_TOPIC: alerts
+
+      POSTGRES_USER: speech
+      POSTGRES_PASSWORD: speech
+      POSTGRES_DB: speech_db
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DSN: postgresql://speech:speech@postgres:5432/speech_db
+
+      PYTHONUNBUFFERED: 1
+      MAX_BOT_TOKEN: ${MAX_BOT_TOKEN}
+      MAX_CHAT_ID: ${MAX_CHAT_ID}
+
+    restart: unless-stopped
+
 volumes:
   minio_data:
   postgres_data:
