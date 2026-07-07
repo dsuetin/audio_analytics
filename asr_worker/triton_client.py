@@ -8,8 +8,13 @@ from tritonclient.utils import np_to_triton_dtype
 from asr_worker.proto.output_pb2 import SpeechRecognitionHypothesis
 
 
-ONLINE_MODEL = "emformer_conformer_online_tdt_punct_microphone_v1"
-FINAL_MODEL = "emformer_conformer_online_finalize_tdt_punct_microphone_v1"
+# ONLINE_MODEL = "emformer_conformer_online_tdt_punct_microphone_v1"
+# FINAL_MODEL = "emformer_conformer_online_finalize_tdt_punct_microphone_v1"
+
+ONLINE_MODEL = "emformer_conformer_online_baseline_v1"
+FINAL_MODEL = "emformer_conformer_online_finalize_baseline_v1"
+
+
 
 
 class TritonASRClient:
