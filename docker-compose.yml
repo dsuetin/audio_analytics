@@ -27,8 +27,10 @@ services:
 
       # ADVERTISED ADDRESSES (самое важное место)
       - --advertise-kafka-addr
-      - INTERNAL://redpanda:9092,EXTERNAL://localhost:19092
-      
+      # - INTERNAL://redpanda:9092,EXTERNAL://192.168.0.10:19092      
+      - INTERNAL://redpanda:9092,EXTERNAL://10.201.0.9:19092
+      # - INTERNAL://redpanda:9092,EXTERNAL://localhost:19092
+
 
     ports:
       - "9092:9092"
@@ -265,6 +267,7 @@ services:
       - ./alert_service:/app/alert_service
 
     environment:
+      NVIDIA_VISIBLE_DEVICES: "0"
       KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
 
       KAFKA_INPUT_TOPIC: asr_transcripts
@@ -280,6 +283,8 @@ services:
       PYTHONUNBUFFERED: 1
       MAX_BOT_TOKEN: ${MAX_BOT_TOKEN}
       MAX_CHAT_ID: ${MAX_CHAT_ID}
+
+    runtime: nvidia
 
     restart: unless-stopped
 
