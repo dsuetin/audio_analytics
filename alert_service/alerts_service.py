@@ -9,7 +9,7 @@ from sentence_transformers import SentenceTransformer
 
 TRIGGER_THRESHOLD = 0.82
 BUY_THRESHOLD = 0.80
-SALESPERSON_THRESHOLD = 0.80
+SALESPERSON_THRESHOLD = 0.75
 
 logger = logging.getLogger(__name__)
 
@@ -103,15 +103,15 @@ class AlertService:
     async def save_purchase(self,session_id):
         await self.db.execute("UPDATE transcripts SET is_sale=TRUE WHERE session_id=$1",session_id)
 
-    async def save_salesperson_change(self, session_id: str):
+    async def save_salesperson_change(self, session_id: str, name: str):
         try:
             await self.db.execute(
                 """
                 UPDATE transcripts
-                SET salesperson_name = $2
+                SET seller_id = $2
                 WHERE session_id = $1
                 """,
-                session_id
+                session_id, name
             )
 
             logger.info(f"SALESPERSON UPDATED: {session_id}")
@@ -168,9 +168,10 @@ class AlertService:
                 "score": sscore,
                 "type": "salesperson_change",
             }
+            name = "_".join(text.split()[-2:])  # Assuming the last two words are the salesperson's name
             await self.emit(self.salesperson_topic, payload)
-            await self.save_salesperson_change(session_id)
-            logger.warning(f"🚨 TRIGGER FIRED: {payload}")
+            await self.save_salesperson_change(session_id, name)
+            logger.warning(f"🚨 TRIGGER FIRED: {payload} name = {name}")
             
 
     async def emit(self, topic: str, payload: dict):
