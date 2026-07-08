@@ -119,5 +119,10 @@ To run it on demand and exit immediately, pass `--once`. You can also force a sp
 If you run it locally and your shell has `POSTGRES_HOST=postgres` from Docker, pass `--postgres-host localhost` explicitly.
 
 
+SELECT * 
+FROM transcripts 
+ORDER BY created_at DESC 
+LIMIT 30;
+
 DELETE FROM transcripts
 WHERE created_at::date = CURRENT_DATE;
