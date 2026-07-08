@@ -63,3 +63,17 @@ python -m grpc_tools.protoc \
   --python_out=generated \
   --grpc_python_out=generated \
   proto/audio.proto
+
+
+CREATE TABLE transcripts (
+    session_id TEXT PRIMARY KEY,
+    store_id TEXT,
+    client_id TEXT,
+    seller_id TEXT,
+    recognition_text TEXT,
+    dialog_type TEXT,
+    is_sale BOOLEAN NOT NULL DEFAULT FALSE,
+    is_alarm_triggered BOOLEAN NOT NULL DEFAULT FALSE,
+    is_final BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

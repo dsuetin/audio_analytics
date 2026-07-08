@@ -15,6 +15,13 @@ import json
 
 from aiokafka import AIOKafkaConsumer
 
+SERVER_IP = "10.201.0.9"
+# SERVER_IP = "192.168.0.10"
+# SERVER_IP = "localhost"
+
+KAFKA_BOOTSTRAP = f"{SERVER_IP}:19092"
+GRPC_ADDR = f"{SERVER_IP}:6000"
+
 
 # ---------------- LOGGING ----------------
 logger = logging.getLogger(__name__)
@@ -103,7 +110,7 @@ client_sessions.append(None)
 async def classification_listener():
     consumer = AIOKafkaConsumer(
         "classified_events",
-        bootstrap_servers="localhost:19092",
+        bootstrap_servers=KAFKA_BOOTSTRAP,
         group_id="mic-client-classification",
         auto_offset_reset="latest",
     )
@@ -127,7 +134,7 @@ async def classification_listener():
 async def new_client_session_listener():
     consumer = AIOKafkaConsumer(
         "new_client_session",
-        bootstrap_servers="localhost:19092",
+        bootstrap_servers=KAFKA_BOOTSTRAP,
         group_id="mic-new-client-session",
         auto_offset_reset="latest",
     )
@@ -151,7 +158,7 @@ async def new_client_session_listener():
 async def kafka_listener():
     consumer = AIOKafkaConsumer(
         "asr_transcripts",
-        bootstrap_servers="localhost:19092",
+        bootstrap_servers=KAFKA_BOOTSTRAP,
         group_id="mic-client",
         auto_offset_reset="latest",
     )
@@ -214,7 +221,7 @@ async def main():
     threading.Thread(target=start_new_client_session_classification, daemon=True).start()
     
 
-    channel = grpc.insecure_channel("localhost:6000")
+    channel = grpc.insecure_channel(GRPC_ADDR)
     stub = bridge_pb2_grpc.AudioBridgeStub(channel)
 
     loop = asyncio.get_running_loop()
