@@ -6,6 +6,8 @@ import asyncpg
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 import numpy as np
 from sentence_transformers import SentenceTransformer
+from alert_service.telegram_bot import TelegramBot
+
 
 TRIGGER_THRESHOLD = 0.82
 BUY_THRESHOLD = 0.80
@@ -72,6 +74,8 @@ class AlertService:
         self.fired_sessions = set()
         self.purchase_sessions = set()
         self.salesperson_sessions = set()
+        self.telegram = TelegramBot(os.getenv("TELEGRAM_TOKEN"))
+        self.telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID", "114987350")
 
     async def start(self):
         self.consumer = AIOKafkaConsumer(self.in_topic,bootstrap_servers=self.bootstrap,group_id="alerts-service",auto_offset_reset="latest")
@@ -87,6 +91,28 @@ class AlertService:
         )
         logger.info("🚨 ALERT SERVICE STARTED")
 
+
+    async def send_telegram(self, text: str):
+
+        if not self.telegram_chat_id:
+            logger.warning("Telegram chat id not configured")
+            return
+
+        try:
+            result = await asyncio.to_thread(
+                self.telegram.send_message,
+                self.telegram_chat_id,
+                text
+            )
+
+            logger.info(
+                f"Telegram sent: {result}"
+            )
+
+        except Exception:
+            logger.exception(
+                "Telegram send failed"
+            )
     def cosine_max_similarity(self,text,embeddings):
         if not text: return 0.0
         emb = self.model.encode(text, normalize_embeddings=True)
@@ -145,6 +171,21 @@ class AlertService:
 
             await self.emit(self.out_topic, payload)
             await self.save_alarm(session_id)
+            await self.send_telegram(
+        f"""
+🚨 Обнаружено возражение
+
+Сессия:
+{session_id}
+
+Фраза:
+{text}
+
+Score:
+{oscore:.2f}
+"""
+    )
+
             logger.warning(f"🚨 TRIGGER FIRED: {payload}")
 
         if purchase and session_id not in self.purchase_sessions:

@@ -245,6 +245,9 @@ services:
       context: .
       dockerfile: alert_service/Dockerfile
 
+    env_file:
+      - .env
+
     container_name: alert-service
 
     networks:
