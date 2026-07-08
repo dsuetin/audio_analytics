@@ -63,3 +63,9 @@ python -m grpc_tools.protoc \
   --python_out=generated \
   --grpc_python_out=generated \
   proto/audio.proto
+
+
+SELECT * 
+FROM transcripts 
+ORDER BY created_at DESC 
+LIMIT 30;
