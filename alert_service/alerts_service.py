@@ -10,7 +10,7 @@ from alert_service.telegram_bot import TelegramBot
 
 
 TRIGGER_THRESHOLD = 0.82
-BUY_THRESHOLD = 0.80
+BUY_THRESHOLD = 0.95
 SALESPERSON_THRESHOLD = 0.75
 
 logger = logging.getLogger(__name__)
@@ -118,12 +118,27 @@ class AlertService:
         emb = self.model.encode(text, normalize_embeddings=True)
         return float(np.max(np.dot(embeddings, emb)))
 
-    def detect(self,text,is_final,embeddings,threshold):
-        if not is_final: return False,0.0
+
+    def detect_scores(self, text: str, is_final: bool):
+        if not is_final:
+            return None
+
         text = text.lower().strip()
-        if len(text) < 2: return False,0.0
-        score = self.cosine_max_similarity(text, embeddings)
-        return score >= threshold, score
+
+        if len(text) < 2:
+            return None
+
+        emb = self.model.encode(text, normalize_embeddings=True)
+
+        objection_score = float(np.max(self.trigger_embeddings @ emb))
+        purchase_score = float(np.max(self.buy_embeddings @ emb))
+        salesperson_score = float(np.max(self.salesperson_embeddings @ emb))
+
+        return {
+            "objection": objection_score,
+            "purchase": purchase_score,
+            "salesperson": salesperson_score,
+        }
 
     async def save_alarm(self,session_id):
         await self.db.execute("UPDATE transcripts SET is_alarm_triggered=TRUE WHERE session_id=$1",session_id)
@@ -148,73 +163,102 @@ class AlertService:
             logger.exception("Failed to update salesperson")
 
 
-    async def handle(self,msg):
-        event = json.loads(msg.value.decode() if isinstance(msg.value,bytes) else msg.value)
+    async def handle(self, msg):
+        event = json.loads(
+            msg.value.decode() if isinstance(msg.value, bytes) else msg.value
+        )
+
         session_id = event.get("session_id")
-        text = event.get("text","")
+        text = event.get("text", "")
         print(f"Received event: {event}")
-        is_final = event.get("is_final",False)
+        scores = self.detect_scores(
+            text=text,
+            is_final=event.get("is_final", False),
+        )
 
-        objection, oscore = self.detect(text, is_final, self.trigger_embeddings, TRIGGER_THRESHOLD)
-        purchase, pscore = self.detect(text, is_final, self.buy_embeddings, BUY_THRESHOLD)
-        salesperson, sscore = self.detect(text, is_final, self.salesperson_embeddings, SALESPERSON_THRESHOLD)
+        if scores is None:
+            return
 
-
-        if objection and session_id not in self.fired_sessions:
+        #
+        # objection
+        #
+        if (
+            scores["objection"] >= TRIGGER_THRESHOLD
+            and session_id not in self.fired_sessions
+        ):
             self.fired_sessions.add(session_id)
-            payload={
-                "session_id":session_id,
-                "text":text,
-                "score":oscore,
-                "type":"objection_trigger"
+
+            payload = {
+                "session_id": session_id,
+                "text": text,
+                "score": scores["objection"],
+                "type": "objection_trigger",
             }
 
-            await self.emit(self.out_topic, payload)
-            await self.save_alarm(session_id)
-            await self.send_telegram(
-        f"""
-🚨 Обнаружено возражение
-
-Сессия:
-{session_id}
-
-Фраза:
-{text}
-
-Score:
-{oscore:.2f}
-"""
-    )
+            await asyncio.gather(
+                self.emit(self.out_topic, payload),
+                self.save_alarm(session_id),
+                self.send_telegram(
+                    f"🚨 Alert\n\n"
+                    f"Session: {session_id}\n"
+                    f"Phrase:\n{text}\n\n"
+                    f"Score: {scores['objection']:.3f}"
+                ),
+            )
 
             logger.warning(f"🚨 TRIGGER FIRED: {payload}")
+            return
 
-        if purchase and session_id not in self.purchase_sessions:
+        #
+        # purchase
+        #
+        if (
+            scores["purchase"] >= BUY_THRESHOLD
+            and session_id not in self.purchase_sessions
+        ):
             self.purchase_sessions.add(session_id)
 
             payload = {
                 "session_id": session_id,
                 "text": text,
-                "score": pscore,
+                "score": scores["purchase"],
                 "type": "purchase",
             }
-            await self.emit(self.purchase_topic, payload)
-            await self.save_purchase(session_id)
-            logger.warning(f"🚨 TRIGGER FIRED: {payload}")
 
+            await asyncio.gather(
+                self.emit(self.purchase_topic, payload),
+                self.save_purchase(session_id),
+            )
 
-        if salesperson and session_id not in self.salesperson_sessions:
+            logger.warning(f"💰 PURCHASE: {payload}")
+            return
+
+        #
+        # salesperson
+        #
+        if (
+            scores["salesperson"] >= SALESPERSON_THRESHOLD
+            and session_id not in self.salesperson_sessions
+        ):
             self.salesperson_sessions.add(session_id)
+
+            name = "_".join(text.split()[-2:])
 
             payload = {
                 "session_id": session_id,
                 "text": text,
-                "score": sscore,
+                "score": scores["salesperson"],
                 "type": "salesperson_change",
             }
-            name = "_".join(text.split()[-2:])  # Assuming the last two words are the salesperson's name
-            await self.emit(self.salesperson_topic, payload)
-            await self.save_salesperson_change(session_id, name)
-            logger.warning(f"🚨 TRIGGER FIRED: {payload} name = {name}")
+
+            await asyncio.gather(
+                self.emit(self.salesperson_topic, payload),
+                self.save_salesperson_change(session_id, name),
+            )
+
+            logger.warning(
+                f"👤 SALESPERSON: {payload}, name={name}"
+            )
             
 
     async def emit(self, topic: str, payload: dict):
