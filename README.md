@@ -77,3 +77,38 @@ CREATE TABLE transcripts (
     is_final BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+## Daily Excel report
+
+The script `scripts/export_daily_transcript_report.py` exports one day of rows from `transcripts` into a readable `.xlsx` workbook and a matching `.pdf` report.
+
+It creates these sheets:
+
+- `Overview` with totals and report metadata
+- `Records` sorted for store/seller review
+- `Clients` sorted for client review
+- `Store summary`
+- `Seller summary`
+- `Client summary`
+
+Run it with either `POSTGRES_DSN` or the usual `POSTGRES_*` variables:
+
+```bash
+python3 scripts/export_daily_transcript_report.py --date 2026-07-12
+```
+
+By default it exports the previous day in `Europe/Moscow` and writes `transcript_report_<date>.xlsx` and `transcript_report_<date>.pdf`.
+
+If you run PostgreSQL locally, set `POSTGRES_HOST=localhost`. If you run the script inside Docker, keep `POSTGRES_HOST=postgres`.
+
+## Nightly stats service
+
+The `stats_service/` container runs the same daily export automatically at `00:00` and saves the files into `/reports`.
+
+Default behavior:
+
+- `REPORT_TIMEZONE=Europe/Moscow`
+- `REPORT_OUTPUT_DIR=/reports`
+- `POSTGRES_HOST=postgres`
+
+You can start it with Docker Compose together with the rest of the stack.

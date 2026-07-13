@@ -1,0 +1,2 @@
+"""Nightly statistics service."""
+

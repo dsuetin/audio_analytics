@@ -248,6 +248,34 @@ services:
 
     restart: unless-stopped
 
+  daily_stats_service:
+    build:
+      context: .
+      dockerfile: stats_service/Dockerfile
+
+    container_name: daily-stats-service
+
+    networks:
+      - speech
+
+    depends_on:
+      - postgres
+
+    volumes:
+      - ./reports:/reports
+
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: speech
+      POSTGRES_PASSWORD: speech
+      POSTGRES_DB: speech_db
+      REPORT_TIMEZONE: Europe/Moscow
+      REPORT_OUTPUT_DIR: /reports
+      PYTHONUNBUFFERED: 1
+
+    restart: unless-stopped
+
   alert_service:
     build:
       context: .
@@ -288,4 +316,3 @@ services:
 volumes:
   minio_data:
   postgres_data:
-
