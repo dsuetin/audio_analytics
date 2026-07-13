@@ -26,12 +26,14 @@ GRPC_ADDR = f"{SERVER_IP}:6000"
 # ---------------- LOGGING ----------------
 logger = logging.getLogger(__name__)
 
+
 def configure_logging():
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
         stream=sys.stdout,
     )
+
 
 configure_logging()
 
@@ -40,10 +42,14 @@ configure_logging()
 SAMPLE_RATE = 16000
 CHUNK_MS = 150
 STORE_ID = 1
-WORKER_NAME = "jon_doe"
+WORKER_NAME = "иванов_иван"
+
 worker_lock = threading.Lock()
+current_stop_event_lock = threading.Lock()
+current_stop_event = None  # type: threading.Event | None
 
 audio_queue = queue.Queue()
+
 
 def audio_callback(indata, frames, time, status):
     if status:
@@ -55,6 +61,19 @@ def make_session_id() -> str:
     with worker_lock:
         worker = WORKER_NAME
     return f"{STORE_ID}-{worker}"
+
+
+def set_current_stop_event(ev: threading.Event | None):
+    global current_stop_event
+    with current_stop_event_lock:
+        current_stop_event = ev
+
+
+def stop_current_session():
+    with current_stop_event_lock:
+        ev = current_stop_event
+    if ev is not None:
+        ev.set()
 
 
 def mic_stream(session_id: str, stop_event: threading.Event):
@@ -90,24 +109,22 @@ def mic_stream(session_id: str, stop_event: threading.Event):
     logger.info("Session stopped session_id=%s", session_id)
 
 
-
 def log_event(message: str, session_id: str):
-    # если сейчас рисуется "живая" строка ASR,
-    # сначала завершаем ее переводом строки
     sys.stdout.write("\n")
     sys.stdout.flush()
-
     logger.info("%s %s", message, session_id)
+
 
 # ---------------- KAFKA ----------------
 
 def print_live(text: str):
-    sys.stdout.write("\r\033[2K")   # очистить текущую строку
+    sys.stdout.write("\r\033[2K")
     sys.stdout.write(text)
     sys.stdout.flush()
 
-client_sessions = []
-client_sessions.append(None)
+
+client_sessions = [None]
+
 
 async def kafka_listener():
     consumer = AIOKafkaConsumer(
@@ -127,21 +144,17 @@ async def kafka_listener():
 
     try:
         async for msg in consumer:
-
             raw = msg.value
             if isinstance(raw, bytes):
                 raw = raw.decode("utf-8")
 
             event = json.loads(raw)
 
-            #
             # -------- Classification --------
-            #
             if msg.topic == "classified_events":
                 client_sessions[-1] = event["label"]
 
                 matched = event.get("matched_words", {})
-
                 parts = []
                 for category, words in matched.items():
                     if words:
@@ -162,39 +175,31 @@ async def kafka_listener():
                     event["label"],
                     " | ".join(parts),
                 )
-
                 continue
 
-            #
             # -------- New session --------
-            #
             if msg.topic == "new_client_session":
                 client_sessions.append(None)
                 logger.info("👤 Client changed -> %s", len(client_sessions))
                 continue
 
-            #
             # -------- Alerts --------
-            #
-            if msg.topic in (
-                "alerts",
-                "purchases",
-                "salesperson_changes",
-            ):
-
+            if msg.topic in ("alerts", "purchases", "salesperson_changes"):
                 if msg.topic == "alerts":
                     icon = "🚨"
-
                 elif msg.topic == "purchases":
                     icon = "💰"
-
                 else:
-                    global WORKER_NAME
                     with worker_lock:
+                        global WORKER_NAME
+                        print("env", event)
                         WORKER_NAME = event.get("new_salesperson", WORKER_NAME)
-                    
                     icon = "👤"
-                stop_event.set()
+
+                    # остановить текущую микросессию,
+                    # чтобы main() сразу создал новую уже с новым WORKER_NAME
+                    stop_current_session()
+
                 logger.info(
                     "%s %s | %.3f | %s",
                     icon,
@@ -202,37 +207,27 @@ async def kafka_listener():
                     event.get("score", 0.0),
                     event.get("text", ""),
                 )
-
                 continue
 
-            #
             # -------- ASR --------
-            #
             if msg.topic == "asr_transcripts":
-
                 class_icon = ""
 
                 if client_sessions[-1] == "buy":
                     class_icon = "🛍️"
-
                 elif client_sessions[-1] == "service":
                     class_icon = "🛠️"
-
                 elif client_sessions[-1] == "return":
                     class_icon = "📦"
 
                 if event["is_final"]:
-
                     print_live(
                         f"{class_icon} 🏁 "
                         f"{event['session_id']}: "
                         f"{event['text']}"
                     )
-
                     print()
-
                 else:
-
                     print_live(
                         f"{class_icon} 🖨️ "
                         f"{event['session_id']}: "
@@ -242,13 +237,13 @@ async def kafka_listener():
     finally:
         await consumer.stop()
 
+
 def start_kafka():
     asyncio.run(kafka_listener())
 
 
 # ---------------- MAIN ----------------
 async def main():
-    # Kafka runs independently
     threading.Thread(target=start_kafka, daemon=True).start()
 
     channel = grpc.insecure_channel(GRPC_ADDR)
@@ -259,17 +254,15 @@ async def main():
     while True:
         session_id = make_session_id()
         stop_event = threading.Event()
-
-        # run gRPC stream in thread (IMPORTANT)
-        stream = await loop.run_in_executor(
-            None,
-            lambda: stub.StreamMic(mic_stream(session_id, stop_event))
-        )
+        set_current_stop_event(stop_event)
 
         try:
-            for msg in stream:
+            stream = await loop.run_in_executor(
+                None,
+                lambda: stub.StreamMic(mic_stream(session_id, stop_event))
+            )
 
-                # ✅ VAD EVENTS
+            for msg in stream:
                 if msg.is_begin:
                     log_event("🟢 SPEECH START", msg.session_id)
 
@@ -281,6 +274,7 @@ async def main():
 
         finally:
             stop_event.set()
+            set_current_stop_event(None)
 
 
 if __name__ == "__main__":
