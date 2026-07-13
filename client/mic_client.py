@@ -195,7 +195,7 @@ async def kafka_listener():
                         print("env", event)
                         WORKER_NAME = event.get("new_salesperson", WORKER_NAME)
                     icon = "👤"
-
+                    client_sessions.append(None)
                     # остановить текущую микросессию,
                     # чтобы main() сразу создал новую уже с новым WORKER_NAME
                     stop_current_session()

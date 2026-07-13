@@ -29,3 +29,5 @@ redpanda_data/
 *.wav
 *.whl
 *.mp3
+*.xlsx
+*.pdf
