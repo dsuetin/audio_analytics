@@ -1,6 +1,6 @@
 networks:
   speech:
-    external: true
+    # external: true
 
 services:
 
@@ -34,6 +34,7 @@ services:
       - "9092:9092"
       - "19092:19092"
       - "9644:9644"   # admin API (optional)
+    restart: unless-stopped
 
   minio:
 
@@ -53,6 +54,7 @@ services:
 
     volumes:
       - minio_data:/data
+    restart: unless-stopped
 
   worker:
     platform: linux/amd64
@@ -84,6 +86,7 @@ services:
 
     ports:
       - "50051:50051"
+    restart: unless-stopped
   
   console:
     image: docker.redpanda.com/redpandadata/console:latest
@@ -96,6 +99,7 @@ services:
       - redpanda
     networks:
       - speech
+    restart: unless-stopped
   vad-client:
     build:
       context: .
@@ -115,6 +119,7 @@ services:
 
     ports:
       - "6000:6000"
+    restart: unless-stopped
 
   asr_worker:
     build:
@@ -172,12 +177,14 @@ services:
       - "5050:80"
     depends_on:
       - postgres
+    restart: unless-stopped
 
   asr:
     image: asr_emformer_mic_cpu:1.0.0
     container_name: triton-asr
     networks:
       - speech
+    restart: unless-stopped
 
   vad:
     platform: linux/amd64
@@ -207,6 +214,7 @@ services:
         --backend-config=onnxruntime,inter_op_thread_count=1
         --backend-config=onnxruntime,execution_mode=1
         --backend-config=onnxruntime,enable-global-threadpool=1
+    restart: unless-stopped
 
   classification_service:
     build:
@@ -274,8 +282,6 @@ services:
       POSTGRES_DSN: postgresql://speech:speech@postgres:5432/speech_db
 
       PYTHONUNBUFFERED: 1
-      MAX_BOT_TOKEN: ${MAX_BOT_TOKEN}
-      MAX_CHAT_ID: ${MAX_CHAT_ID}
 
     restart: unless-stopped
 
