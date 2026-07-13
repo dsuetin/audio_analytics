@@ -9,7 +9,7 @@ from sentence_transformers import SentenceTransformer
 from alert_service.telegram_bot import TelegramBot
 
 
-TRIGGER_THRESHOLD = 0.82
+TRIGGER_THRESHOLD = 0.90
 BUY_THRESHOLD = 0.95
 SALESPERSON_THRESHOLD = 0.75
 
@@ -25,7 +25,7 @@ TRIGGER_PHRASES = [
     "я вам сам перезвоню когда приму решение",
     "мне кажется мой старый еще можно подзарядить",
     "я подожду до зарплаты следующего месяца",
-    "поискать что-нибудь другое у вас мало выбора",
+    "поискать что нибудь другое у вас мало выбора",
     "в интернете я видел такой же но дешевле",
     "не уверен что мне подойдет",
     "гарантия всего год маловато",
@@ -249,6 +249,7 @@ class AlertService:
                 "text": text,
                 "score": scores["salesperson"],
                 "type": "salesperson_change",
+                "new_salesperson": name,
             }
 
             await asyncio.gather(
