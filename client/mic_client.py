@@ -15,9 +15,9 @@ import json
 
 from aiokafka import AIOKafkaConsumer
 
-SERVER_IP = "10.201.0.9"
+# SERVER_IP = "10.201.0.9"
 # SERVER_IP = "192.168.0.10"
-# SERVER_IP = "localhost"
+SERVER_IP = "localhost"
 
 KAFKA_BOOTSTRAP = f"{SERVER_IP}:19092"
 GRPC_ADDR = f"{SERVER_IP}:6000"
@@ -40,10 +40,10 @@ configure_logging()
 SAMPLE_RATE = 16000
 CHUNK_MS = 150
 STORE_ID = 1
-WORKER_NAME = "DANIIL_SUETIN"
+WORKER_NAME = "jon_doe"
+worker_lock = threading.Lock()
 
 audio_queue = queue.Queue()
-
 
 def audio_callback(indata, frames, time, status):
     if status:
@@ -52,7 +52,9 @@ def audio_callback(indata, frames, time, status):
 
 
 def make_session_id() -> str:
-    return f"{STORE_ID}-{WORKER_NAME}"
+    with worker_lock:
+        worker = WORKER_NAME
+    return f"{STORE_ID}-{worker}"
 
 
 def mic_stream(session_id: str, stop_event: threading.Event):
@@ -107,57 +109,14 @@ def print_live(text: str):
 client_sessions = []
 client_sessions.append(None)
 
-async def classification_listener():
-    consumer = AIOKafkaConsumer(
-        "classified_events",
-        bootstrap_servers=KAFKA_BOOTSTRAP,
-        group_id="mic-client-classification",
-        auto_offset_reset="latest",
-    )
-
-    await consumer.start()
-
-    try:
-        async for msg in consumer:
-
-            raw = msg.value
-            if isinstance(raw, bytes):
-                raw = raw.decode()
-
-            event = json.loads(raw)
-            client_sessions[-1] = event["label"]
-
-    finally:
-        await consumer.stop()
-
-
-async def new_client_session_listener():
-    consumer = AIOKafkaConsumer(
-        "new_client_session",
-        bootstrap_servers=KAFKA_BOOTSTRAP,
-        group_id="mic-new-client-session",
-        auto_offset_reset="latest",
-    )
-
-    await consumer.start()
-
-    try:
-        async for msg in consumer:
-
-            raw = msg.value
-            if isinstance(raw, bytes):
-                raw = raw.decode()
-
-            event = json.loads(raw)
-            client_sessions.append(None)
-
-    finally:
-        await consumer.stop()
-
-
 async def kafka_listener():
     consumer = AIOKafkaConsumer(
         "asr_transcripts",
+        "classified_events",
+        "new_client_session",
+        "alerts",
+        "purchases",
+        "salesperson_changes",
         bootstrap_servers=KAFKA_BOOTSTRAP,
         group_id="mic-client",
         auto_offset_reset="latest",
@@ -165,41 +124,120 @@ async def kafka_listener():
 
     await consumer.start()
     logger.info("Kafka consumer started")
-    "🛍️"
-    "🔋"
-    "🛠️"
-    "💵"
-    "🚨"
-
-
 
     try:
         async for msg in consumer:
-            class_icon = ""
-            if client_sessions[-1] == "buy":
-                class_icon = "🛍️"   # пакет покупок
-            elif client_sessions[-1] == "service":
-                class_icon = "🛠️"   # инструмент
-            elif client_sessions[-1] == "return":
-                class_icon = "📦"   # инструмент
 
             raw = msg.value
-            # aiokafka может вернуть bytes или str
             if isinstance(raw, bytes):
                 raw = raw.decode("utf-8")
 
             event = json.loads(raw)
-            if event["is_final"]:
-                icon = "🏁"   # клетчатый флаг
-                print_live(
-                   f"{class_icon} {icon} {event['session_id']}: {event['text']}"
+
+            #
+            # -------- Classification --------
+            #
+            if msg.topic == "classified_events":
+                client_sessions[-1] = event["label"]
+
+                matched = event.get("matched_words", {})
+
+                parts = []
+                for category, words in matched.items():
+                    if words:
+                        parts.append(
+                            f"{category}: "
+                            + ", ".join(
+                                f"{w}({c})"
+                                for w, c in sorted(
+                                    words.items(),
+                                    key=lambda x: x[1],
+                                    reverse=True,
+                                )
+                            )
+                        )
+
+                logger.info(
+                    "%s | %s",
+                    event["label"],
+                    " | ".join(parts),
                 )
-                print()
-            else:
-                icon = "🖨️"   # печатная машинка
-                print_live(
-                   f"{class_icon} {icon} {event['session_id']}: {event['text']}"
+
+                continue
+
+            #
+            # -------- New session --------
+            #
+            if msg.topic == "new_client_session":
+                client_sessions.append(None)
+                logger.info("👤 Client changed -> %s", len(client_sessions))
+                continue
+
+            #
+            # -------- Alerts --------
+            #
+            if msg.topic in (
+                "alerts",
+                "purchases",
+                "salesperson_changes",
+            ):
+
+                if msg.topic == "alerts":
+                    icon = "🚨"
+
+                elif msg.topic == "purchases":
+                    icon = "💰"
+
+                else:
+                    global WORKER_NAME
+                    with worker_lock:
+                        WORKER_NAME = event.get("new_salesperson", WORKER_NAME)
+                    
+                    icon = "👤"
+                stop_event.set()
+                logger.info(
+                    "%s %s | %.3f | %s",
+                    icon,
+                    event["session_id"],
+                    event.get("score", 0.0),
+                    event.get("text", ""),
                 )
+
+                continue
+
+            #
+            # -------- ASR --------
+            #
+            if msg.topic == "asr_transcripts":
+
+                class_icon = ""
+
+                if client_sessions[-1] == "buy":
+                    class_icon = "🛍️"
+
+                elif client_sessions[-1] == "service":
+                    class_icon = "🛠️"
+
+                elif client_sessions[-1] == "return":
+                    class_icon = "📦"
+
+                if event["is_final"]:
+
+                    print_live(
+                        f"{class_icon} 🏁 "
+                        f"{event['session_id']}: "
+                        f"{event['text']}"
+                    )
+
+                    print()
+
+                else:
+
+                    print_live(
+                        f"{class_icon} 🖨️ "
+                        f"{event['session_id']}: "
+                        f"{event['text']}"
+                    )
 
     finally:
         await consumer.stop()
@@ -207,19 +245,11 @@ async def kafka_listener():
 def start_kafka():
     asyncio.run(kafka_listener())
 
-def start_classification():
-    asyncio.run(classification_listener())
-
-def start_new_client_session_classification():
-    asyncio.run(new_client_session_listener())
 
 # ---------------- MAIN ----------------
 async def main():
     # Kafka runs independently
     threading.Thread(target=start_kafka, daemon=True).start()
-    threading.Thread(target=start_classification, daemon=True).start()
-    threading.Thread(target=start_new_client_session_classification, daemon=True).start()
-    
 
     channel = grpc.insecure_channel(GRPC_ADDR)
     stub = bridge_pb2_grpc.AudioBridgeStub(channel)

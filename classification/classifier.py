@@ -30,19 +30,34 @@ def score(histogram: Counter):
     buy = 0
     ret = 0
     svc = 0
+    buy_words = {}
+    return_words = {}
+    service_words = {}
 
     for word, count in histogram.items():
 
         if word in BUY_KEYWORDS:
             buy += count
+            buy_words[word] = count
 
         if word in RETURN_KEYWORDS:
             ret += count
+            return_words[word] = count
 
         if word in SERVICE_KEYWORDS:
             svc += count
+            service_words[word] = count
 
-    return buy, ret, svc
+    return (
+        buy,
+        ret,
+        svc,
+        {
+            "buy": buy_words,
+            "return": return_words,
+            "service": service_words,
+        },
+    )
 
 
 def best_label(buy, ret, svc):

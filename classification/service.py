@@ -92,6 +92,7 @@ class ClassificationService:
         buy,
         ret,
         svc,
+        matched_words,
     ):
         print("emit", session_id, chunk_id, is_final, text, label, mode, buy, ret, svc)
         event = {
@@ -107,6 +108,7 @@ class ClassificationService:
                 "return": ret,
                 "service": svc,
             },
+            "matched_words": matched_words,
         }
 
         logger.info("EMIT %s", event)
@@ -165,7 +167,7 @@ class ClassificationService:
             working += self.state.session(sid).partial
 
         print("\nWORKING:")
-        buy, ret, svc = score(working)
+        buy, ret, svc, matched_words = score(working)
         print("session buy, ret, svc", buy, ret, svc)
 
         label, score_value = best_label(
@@ -201,6 +203,7 @@ class ClassificationService:
                 buy,
                 ret,
                 svc,
+                matched_words,
             )
 
             self.state.threshold_sent = True
@@ -211,7 +214,9 @@ class ClassificationService:
         
         # смена сценария
         
-        if label != self.state.last_label and score_value > self.state.last_score:
+        if (self.state.threshold_sent
+            and label != self.state.last_label
+            and score_value > self.state.last_score):
 
             await self.emit(
                 session_id,
@@ -223,6 +228,7 @@ class ClassificationService:
                 buy,
                 ret,
                 svc,
+                matched_words,
             )
 
             self.state.last_label = label
