@@ -6,24 +6,40 @@ import html
 import os
 import re
 import socket
+import sys
 import zipfile
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
-import textwrap
 from zoneinfo import ZoneInfo
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4, A3, landscape
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.platypus import (
+    SimpleDocTemplate,
+    Table,
+    TableStyle,
+    Paragraph,
+    Spacer,
+    PageBreak,
+)
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 
 
 REPORT_COLUMNS = [
-    "session_id",
-    "store_id",
-    "client_id",
-    "seller_id",
+    "created_at",
     "recognition_text",
+    "seller_id",
+    "client_id",
     "dialog_type",
     "is_sale",
     "is_alarm_triggered",
-    "created_at",
+    "session_id",
 ]
 
 
@@ -348,205 +364,57 @@ def content_types_xml(sheet_count: int) -> str:
     )
 
 
-def sort_rows(rows: list[ReportRow], key_order: list[str]) -> list[ReportRow]:
-    def sort_key(row: ReportRow):
-        values = []
-        for field in key_order:
-            value = getattr(row, field)
-            if isinstance(value, datetime):
-                values.append(value)
-            elif value is None:
-                values.append("")
-            else:
-                values.append(str(value))
-        return tuple(values)
+def build_sheets(
+    rows: list[ReportRow],
+    report_date: date,
+    generated_at: datetime,
+    tz_name: str,
+) -> list[SheetSpec]:
 
-    return sorted(rows, key=sort_key)
+    zone = ZoneInfo(tz_name)
 
-
-def summary_rows(rows: list[ReportRow], group_field: str, extra_fields: list[str]) -> list[list[object]]:
-    groups: dict[str, dict[str, object]] = {}
+    stores: dict[str, list[ReportRow]] = {}
 
     for row in rows:
-        key_value = getattr(row, group_field) or "UNKNOWN"
-        key = str(key_value)
-        group = groups.setdefault(
-            key,
-            {
-                "count": 0,
-                "sales": 0,
-                "alarms": 0,
-                "dialog_types": set(),
-                "extras": {field: set() for field in extra_fields},
-                "first_created_at": row.created_at,
-                "last_created_at": row.created_at,
-            },
+        store_name = row.store_id or ""
+        stores.setdefault(store_name, []).append(row)
+
+    sheets = []
+
+    for store_id, store_rows in sorted(stores.items()):
+
+        store_rows = sorted(
+            store_rows,
+            key=lambda row: row.created_at
         )
 
-        group["count"] += 1
-        group["sales"] += int(row.is_sale)
-        group["alarms"] += int(row.is_alarm_triggered)
-
-        dialog_type = row.dialog_type or "UNKNOWN"
-        group["dialog_types"].add(dialog_type)
-
-        for field in extra_fields:
-            value = getattr(row, field) or "UNKNOWN"
-            group["extras"][field].add(str(value))
-
-        if row.created_at < group["first_created_at"]:
-            group["first_created_at"] = row.created_at
-        if row.created_at > group["last_created_at"]:
-            group["last_created_at"] = row.created_at
-
-    result = []
-    for key in sorted(groups):
-        group = groups[key]
-        row = [
-            key,
-            group["count"],
-            group["sales"],
-            group["alarms"],
-            len(group["dialog_types"]),
-            ", ".join(sorted(group["dialog_types"])),
+        sheet_rows = [
+            [
+                row.created_at.astimezone(zone),
+                row.recognition_text or "",
+                row.seller_id or "",
+                row.client_id or "",
+                row.dialog_type or "",
+                row.is_sale,
+                row.is_alarm_triggered,
+                row.session_id,
+            ]
+            for row in store_rows
         ]
-        for field in extra_fields:
-            row.append(", ".join(sorted(group["extras"].get(field, set()))))
-        row.extend([group["first_created_at"], group["last_created_at"]])
-        result.append(row)
 
-    return result
+        sheet_name = store_id if store_id else "Без магазина"
 
+        sheets.append(
+            SheetSpec(
+                name=safe_sheet_name(sheet_name),
+                headers=REPORT_COLUMNS,
+                rows=sheet_rows,
+                wrap_columns={2},
+                datetime_columns={1},
+            )
+        )
 
-def build_sheets(rows: list[ReportRow], report_date: date, generated_at: datetime, tz_name: str) -> list[SheetSpec]:
-    record_rows = [
-        [
-            row.session_id,
-            row.store_id or "",
-            row.client_id or "",
-            row.seller_id or "",
-            row.recognition_text or "",
-            row.dialog_type or "UNKNOWN",
-            row.is_sale,
-            row.is_alarm_triggered,
-            row.created_at.astimezone(ZoneInfo(tz_name)),
-        ]
-        for row in rows
-    ]
-
-    client_rows = [
-        [
-            row.session_id,
-            row.client_id or "",
-            row.store_id or "",
-            row.seller_id or "",
-            row.recognition_text or "",
-            row.dialog_type or "UNKNOWN",
-            row.is_sale,
-            row.is_alarm_triggered,
-            row.created_at.astimezone(ZoneInfo(tz_name)),
-        ]
-        for row in sort_rows(rows, ["client_id", "store_id", "seller_id", "created_at"])
-    ]
-
-    store_summary = summary_rows(rows, "store_id", ["client_id", "seller_id"])
-    seller_summary = summary_rows(rows, "seller_id", ["store_id", "client_id"])
-    client_summary = summary_rows(rows, "client_id", ["store_id", "seller_id"])
-
-    store_headers = [
-        "store_id",
-        "sessions_count",
-        "sales_count",
-        "alarm_count",
-        "dialog_types_count",
-        "dialog_types",
-        "client_ids",
-        "seller_ids",
-        "first_created_at",
-        "last_created_at",
-    ]
-    seller_headers = [
-        "seller_id",
-        "sessions_count",
-        "sales_count",
-        "alarm_count",
-        "dialog_types_count",
-        "dialog_types",
-        "store_ids",
-        "client_ids",
-        "first_created_at",
-        "last_created_at",
-    ]
-    client_headers = [
-        "client_id",
-        "sessions_count",
-        "sales_count",
-        "alarm_count",
-        "dialog_types_count",
-        "dialog_types",
-        "store_ids",
-        "seller_ids",
-        "first_created_at",
-        "last_created_at",
-    ]
-
-    overview_rows = [
-        ["Report date", report_date.isoformat()],
-        ["Generated at", generated_at.astimezone(ZoneInfo(tz_name)).strftime("%Y-%m-%d %H:%M:%S %Z")],
-        ["Timezone", tz_name],
-        ["Total records", len(rows)],
-        ["Total sales", sum(int(row.is_sale) for row in rows)],
-        ["Total alarms", sum(int(row.is_alarm_triggered) for row in rows)],
-        ["Unique stores", len({row.store_id or "UNKNOWN" for row in rows})],
-        ["Unique sellers", len({row.seller_id or "UNKNOWN" for row in rows})],
-        ["Unique clients", len({row.client_id or "UNKNOWN" for row in rows})],
-        ["Notes", "Use the Records sheet for detailed sessions and the summary sheets for store/seller/client rollups."],
-    ]
-
-    return [
-        SheetSpec(
-            name="Overview",
-            headers=["Metric", "Value"],
-            rows=overview_rows,
-            wrap_columns={2},
-            auto_filter=False,
-        ),
-        SheetSpec(
-            name="Records",
-            headers=REPORT_COLUMNS,
-            rows=record_rows,
-            wrap_columns={5},
-            datetime_columns={9},
-        ),
-        SheetSpec(
-            name="Clients",
-            headers=REPORT_COLUMNS,
-            rows=client_rows,
-            wrap_columns={5},
-            datetime_columns={9},
-        ),
-        SheetSpec(
-            name="Store summary",
-            headers=store_headers,
-            rows=store_summary,
-            wrap_columns={6, 7, 8},
-            datetime_columns={9, 10},
-        ),
-        SheetSpec(
-            name="Seller summary",
-            headers=seller_headers,
-            rows=seller_summary,
-            wrap_columns={6, 7, 8},
-            datetime_columns={9, 10},
-        ),
-        SheetSpec(
-            name="Client summary",
-            headers=client_headers,
-            rows=client_summary,
-            wrap_columns={6, 7, 8},
-            datetime_columns={9, 10},
-        ),
-    ]
+    return sheets
 
 
 def write_xlsx(path: Path, sheets: list[SheetSpec]) -> None:
@@ -591,7 +459,7 @@ async def fetch_rows(
                     FROM transcripts
                     WHERE created_at >= $1
                       AND created_at < $2
-                    ORDER BY created_at, store_id, seller_id, client_id, session_id
+                    ORDER BY created_at, session_id
                     """,
                     start_at,
                     end_at,
@@ -623,7 +491,7 @@ async def fetch_rows(
                 FROM transcripts
                 WHERE created_at >= $1
                   AND created_at < $2
-                ORDER BY created_at, store_id, seller_id, client_id, session_id
+                ORDER BY created_at, session_id
                 """,
                 start_at,
                 end_at,
@@ -644,274 +512,213 @@ def resolve_target_date(date_value: str | None, tz_name: str) -> date:
 def build_output_path(output: str | None, report_date: date) -> Path:
     if output:
         return Path(output)
-    return Path(f"transcript_report_{report_date.isoformat()}.xlsx")
+
+    output_dir = Path(
+        os.getenv(
+            "REPORT_OUTPUT_DIR",
+            "reports"
+        )
+    )
+
+    return output_dir / (
+        f"transcript_report_{report_date.isoformat()}.xlsx"
+    )
 
 
 def build_pdf_output_path(output: str | None, report_date: date) -> Path:
     if output:
         return Path(output).with_suffix(".pdf")
-    return Path(f"transcript_report_{report_date.isoformat()}.pdf")
 
+    output_dir = Path(
+        os.getenv(
+            "REPORT_OUTPUT_DIR",
+            "reports"
+        )
+    )
+
+    return output_dir / (
+        f"transcript_report_{report_date.isoformat()}.pdf"
+    )
 
 def env_value(name: str, default: str) -> str:
     value = os.getenv(name, "").strip()
     return value or default
 
+def write_pdf(
+    path: Path,
+    rows: list[ReportRow],
+    report_date: date,
+    generated_at: datetime,
+    tz_name: str,
+) -> None:
 
-def pdf_escape(text: str) -> str:
-    return (
-        text.replace("\\", "\\\\")
-        .replace("(", "\\(")
-        .replace(")", "\\)")
-        .replace("\r", "")
-        .replace("\n", "\\n")
+    font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+
+    if Path(font_path).exists():
+        pdfmetrics.registerFont(
+            TTFont("DejaVuSans", font_path)
+        )
+        font_name = "DejaVuSans"
+    else:
+        font_name = "Helvetica"
+
+    print("PDF FONT:", font_name)
+
+
+    doc = SimpleDocTemplate(
+        str(path),
+        pagesize=landscape(A3),
+        rightMargin=15,
+        leftMargin=15,
+        topMargin=20,
+        bottomMargin=20,
+    )
+
+    normal = ParagraphStyle(
+        "normal",
+        fontName=font_name,
+        fontSize=8,
+        leading=10,
+    )
+
+    def pdf_cell(value):
+        return Paragraph(
+            html.escape(str(value or "")),
+            normal
+        )
+
+    header = ParagraphStyle(
+        "header",
+        fontName=font_name,
+        fontSize=12,
+        leading=14,
     )
 
 
-def wrap_pdf_text(text: str, width: int) -> list[str]:
-    if not text:
-        return [""]
-    return textwrap.wrap(
-        text,
-        width=width,
-        break_long_words=False,
-        break_on_hyphens=False,
-    ) or [text]
+    story = []
 
 
-def summary_lines(title: str, headers: list[str], rows: list[list[object]], limit: int = 12) -> list[str]:
-    lines = [f"## {title}", ""]
-    lines.append(" | ".join(headers))
-    lines.append("-" * min(110, max(len(" | ".join(headers)), 20)))
-    for row in rows[:limit]:
-        joined_row = " | ".join(normalize_value(value) for value in row)
-        lines.extend(wrap_pdf_text(joined_row, 110))
-    if len(rows) > limit:
-        lines.append(f"... and {len(rows) - limit} more rows")
-    lines.append("")
-    return lines
+    stores: dict[str, list[ReportRow]] = {}
 
-
-def detailed_record_lines(rows: list[ReportRow]) -> list[str]:
-    lines = ["## Detailed records", ""]
     for row in rows:
-        header = (
-            f"{row.created_at:%Y-%m-%d %H:%M:%S} | store={row.store_id or 'UNKNOWN'} | "
-            f"seller={row.seller_id or 'UNKNOWN'} | client={row.client_id or 'UNKNOWN'} | "
-            f"sale={'Y' if row.is_sale else 'N'} | alarm={'Y' if row.is_alarm_triggered else 'N'} | "
-            f"dialog={row.dialog_type or 'UNKNOWN'} | session={row.session_id}"
-        )
-        lines.extend(wrap_pdf_text(header, 110))
-        for wrapped_line in wrap_pdf_text(row.recognition_text or "", 110):
-            lines.append(f"  text: {wrapped_line}")
-        lines.append("")
-    return lines
+        store = row.store_id or ""
+        stores.setdefault(store, []).append(row)
 
 
-class SimplePdfWriter:
-    def __init__(self, title: str):
-        self.title = title
-        self.pages: list[list[str]] = []
+    for store_id, store_rows in sorted(stores.items()):
 
-    def add_page(self, lines: list[str]) -> None:
-        self.pages.append(lines)
-
-    def add_lines_as_pages(self, lines: list[str], lines_per_page: int = 44) -> None:
-        current_page: list[str] = []
-        for line in lines:
-            current_page.append(line)
-            if len(current_page) >= lines_per_page:
-                self.add_page(current_page)
-                current_page = []
-        if current_page or not self.pages:
-            self.add_page(current_page)
-
-    def build(self) -> bytes:
-        page_width = 595.2756
-        page_height = 841.8898
-        margin_left = 40
-        margin_top = 48
-        line_height = 13
-        font_size = 10
-
-        objects: list[bytes] = []
-
-        def add_object(content: bytes) -> int:
-            objects.append(content)
-            return len(objects)
-
-        font_regular = add_object(
-            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
-        )
-        font_bold = add_object(
-            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>"
+        store_rows.sort(
+            key=lambda r: r.created_at
         )
 
-        page_object_ids: list[int] = []
-        content_object_ids: list[int] = []
 
-        def text_stream(lines: list[str]) -> bytes:
-            content_parts = [
-                "BT",
-                f"/F1 {font_size} Tf",
-                f"1 0 0 1 {margin_left} {page_height - margin_top} Tm",
-                f"{line_height} TL",
+        story.append(
+            Paragraph(
+                f"Магазин: {store_id}",
+                header
+            )
+        )
+
+        story.append(Spacer(1, 10))
+
+
+        table_data = [
+            [
+                "Время",
+                "Расшифровка",
+                "Продавец",
+                "Клиент",
+                "Тип",
+                "Успех",
+                "Тревога",
+                "Session",
             ]
-            for line in lines:
-                if line.startswith("## "):
-                    content_parts.append("/F2 12 Tf")
-                    content_parts.append(f"({pdf_escape(line[3:])}) Tj")
-                    content_parts.append(f"/F1 {font_size} Tf")
-                    content_parts.append("T*")
-                    continue
-                if line == "":
-                    content_parts.append("T*")
-                    continue
-                content_parts.append(f"({pdf_escape(line)}) Tj")
-                content_parts.append("T*")
-            content_parts.append("ET")
-            return "\n".join(content_parts).encode("latin-1", "replace")
-
-        for page_lines in self.pages:
-            content = text_stream(page_lines)
-            content_object_ids.append(add_object(
-                b"<< /Length "
-                + str(len(content)).encode()
-                + b" >>\nstream\n"
-                + content
-                + b"\nendstream"
-            ))
-            page_dict = (
-                f"<< /Type /Page /Parent 0 0 R /MediaBox [0 0 {page_width:.4f} {page_height:.4f}] "
-                f"/Resources << /Font << /F1 {font_regular} 0 R /F2 {font_bold} 0 R >> >> "
-                f"/Contents {content_object_ids[-1]} 0 R >>"
-            ).encode()
-            page_object_ids.append(add_object(page_dict))
-
-        kids = " ".join(f"{obj_id} 0 R" for obj_id in page_object_ids)
-        pages_id = add_object(
-            f"<< /Type /Pages /Kids [{kids}] /Count {len(page_object_ids)} >>".encode()
-        )
-        catalog_id = add_object(f"<< /Type /Catalog /Pages {pages_id} 0 R >>".encode())
-
-        # Fix parent references now that pages_id is known.
-        for index, page_id in enumerate(page_object_ids):
-            page_object = objects[page_id - 1].decode()
-            page_object = page_object.replace("/Parent 0 0 R", f"/Parent {pages_id} 0 R")
-            objects[page_id - 1] = page_object.encode()
-
-        pdf = bytearray()
-        pdf.extend(b"%PDF-1.4\n")
-        offsets = [0]
-        for index, obj in enumerate(objects, start=1):
-            offsets.append(len(pdf))
-            pdf.extend(f"{index} 0 obj\n".encode())
-            pdf.extend(obj)
-            pdf.extend(b"\nendobj\n")
-        xref_start = len(pdf)
-        pdf.extend(f"xref\n0 {len(objects) + 1}\n".encode())
-        pdf.extend(b"0000000000 65535 f \n")
-        for offset in offsets[1:]:
-            pdf.extend(f"{offset:010d} 00000 n \n".encode())
-        pdf.extend(
-            (
-                "trailer\n"
-                f"<< /Size {len(objects) + 1} /Root {catalog_id} 0 R >>\n"
-                f"startxref\n{xref_start}\n%%EOF\n"
-            ).encode()
-        )
-        return bytes(pdf)
-
-
-def write_pdf(path: Path, rows: list[ReportRow], report_date: date, generated_at: datetime, tz_name: str) -> None:
-    overview_rows = [
-        ["Report date", report_date.isoformat()],
-        ["Generated at", generated_at.astimezone(ZoneInfo(tz_name)).strftime("%Y-%m-%d %H:%M:%S %Z")],
-        ["Timezone", tz_name],
-        ["Total records", len(rows)],
-        ["Total sales", sum(int(row.is_sale) for row in rows)],
-        ["Total alarms", sum(int(row.is_alarm_triggered) for row in rows)],
-        ["Unique stores", len({row.store_id or "UNKNOWN" for row in rows})],
-        ["Unique sellers", len({row.seller_id or "UNKNOWN" for row in rows})],
-        ["Unique clients", len({row.client_id or "UNKNOWN" for row in rows})],
-    ]
-
-    store_summary = summary_rows(rows, "store_id", ["client_id", "seller_id"])
-    seller_summary = summary_rows(rows, "seller_id", ["store_id", "client_id"])
-    client_summary = summary_rows(rows, "client_id", ["store_id", "seller_id"])
-
-    lines: list[str] = []
-    lines.extend([f"## Transcript report for {report_date.isoformat()}", ""])
-    lines.extend(
-        [
-            "## Overview",
-            *[
-                f"- {metric}: {value}"
-                for metric, value in overview_rows
-            ],
-            "",
         ]
-    )
-    lines.extend(
-        summary_lines(
-            "Store summary",
-            [
-                "store_id",
-                "sessions_count",
-                "sales_count",
-                "alarm_count",
-                "dialog_types_count",
-                "dialog_types",
-                "client_ids",
-                "seller_ids",
-                "first_created_at",
-                "last_created_at",
-            ],
-            store_summary,
-        )
-    )
-    lines.extend(
-        summary_lines(
-            "Seller summary",
-            [
-                "seller_id",
-                "sessions_count",
-                "sales_count",
-                "alarm_count",
-                "dialog_types_count",
-                "dialog_types",
-                "store_ids",
-                "client_ids",
-                "first_created_at",
-                "last_created_at",
-            ],
-            seller_summary,
-        )
-    )
-    lines.extend(
-        summary_lines(
-            "Client summary",
-            [
-                "client_id",
-                "sessions_count",
-                "sales_count",
-                "alarm_count",
-                "dialog_types_count",
-                "dialog_types",
-                "store_ids",
-                "seller_ids",
-                "first_created_at",
-                "last_created_at",
-            ],
-            client_summary,
-        )
-    )
-    lines.extend(detailed_record_lines(rows))
 
-    pdf = SimplePdfWriter(f"Transcript report {report_date.isoformat()}")
-    pdf.add_lines_as_pages(lines)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(pdf.build())
+
+        for row in store_rows:
+
+            table_data.append(
+                [
+                    pdf_cell(row.created_at.strftime("%Y-%m-%d %H:%M:%S")),
+                    pdf_cell(row.recognition_text),
+                    pdf_cell(row.seller_id),
+                    pdf_cell(row.client_id),
+                    pdf_cell(row.dialog_type),
+                    pdf_cell("Да" if row.is_sale else ""),
+                    pdf_cell("Да" if row.is_alarm_triggered else ""),
+                    pdf_cell(row.session_id),
+                ]
+            )
+
+
+        table = Table(
+            table_data,
+            repeatRows=1,
+            colWidths=[
+                90,    # время
+                550,   # расшифровка
+                80,    # продавец
+                40,    # клиент
+                30,    # тип
+                40,    # успех
+                40,    # тревога
+                220,   # session
+            ]
+        )
+
+
+        table.setStyle(
+            TableStyle(
+                [
+                    (
+                        "FONT",
+                        (0,0),
+                        (-1,-1),
+                        font_name,
+                        8,
+                    ),
+                    (
+                        "BACKGROUND",
+                        (0,0),
+                        (-1,0),
+                        colors.lightgrey,
+                    ),
+                    (
+                        "VALIGN",
+                        (0,0),
+                        (-1,-1),
+                        "TOP",
+                    ),
+                    (
+                        "GRID",
+                        (0,0),
+                        (-1,-1),
+                        0.25,
+                        colors.grey,
+                    ),
+                    (
+                        "LEFTPADDING",
+                        (0,0),
+                        (-1,-1),
+                        4,
+                    ),
+                    (
+                        "RIGHTPADDING",
+                        (0,0),
+                        (-1,-1),
+                        4,
+                    ),
+                ]
+            )
+        )
+
+
+        story.append(table)
+        story.append(PageBreak())
+
+
+    doc.build(story)
 
 
 async def main() -> None:

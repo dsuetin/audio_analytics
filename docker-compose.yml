@@ -263,6 +263,7 @@ services:
 
     volumes:
       - ./reports:/reports
+      - ./stats_service:/app/stats_service
 
     environment:
       POSTGRES_HOST: postgres

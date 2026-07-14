@@ -108,7 +108,12 @@ The `stats_service/` container runs the same daily export automatically at `00:0
 Default behavior:
 
 - `REPORT_TIMEZONE=Europe/Moscow`
-- `REPORT_OUTPUT_DIR=/reports`
+- `REPORT_OUTPUT_DIR=reports` locally
+- `REPORT_OUTPUT_DIR=/reports` in Docker
 - `POSTGRES_HOST=postgres`
 
 You can start it with Docker Compose together with the rest of the stack.
+
+To run it on demand and exit immediately, pass `--once`. You can also force a specific date with `--date YYYY-MM-DD`.
+
+If you run it locally and your shell has `POSTGRES_HOST=postgres` from Docker, pass `--postgres-host localhost` explicitly.

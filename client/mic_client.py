@@ -179,7 +179,8 @@ async def kafka_listener():
 
             # -------- New session --------
             if msg.topic == "new_client_session":
-                client_sessions.append(None)
+                if client_sessions[-1] is not None:
+                    client_sessions.append(None)
                 logger.info("👤 Client changed -> %s", len(client_sessions))
                 continue
 
