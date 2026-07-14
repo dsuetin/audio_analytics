@@ -2,6 +2,30 @@ networks:
   speech:
     # external: true
 
+x-daily-stats: &daily-stats
+  build:
+    context: .
+    dockerfile: stats_service/Dockerfile
+
+  networks:
+    - speech
+
+  depends_on:
+    - postgres
+
+  volumes:
+    - ./reports:/reports
+    - ./stats_service:/app/stats_service
+
+  environment:
+    POSTGRES_HOST: postgres
+    POSTGRES_PORT: 5432
+    POSTGRES_USER: speech
+    POSTGRES_PASSWORD: speech
+    POSTGRES_DB: speech_db
+    REPORT_TIMEZONE: Europe/Moscow
+    REPORT_OUTPUT_DIR: /reports
+
 services:
 
   redpanda:
@@ -61,6 +85,7 @@ services:
     volumes:
       - ./storage_worker:/app/storage_worker
       - ./proto:/app/proto
+    image: audio_ingestion_starter-worker:latest
     build:
       context: .
       dockerfile: storage_worker/Dockerfile
@@ -101,6 +126,7 @@ services:
       - speech
     restart: unless-stopped
   vad-client:
+    image: audio_ingestion_starter-vad-client:latest
     build:
       context: .
       dockerfile: client/Dockerfile
@@ -122,6 +148,7 @@ services:
     restart: unless-stopped
 
   asr_worker:
+    image: audio_ingestion_starter-asr_worker:latest
     build:
       context: .
       dockerfile: asr_worker/Dockerfile
@@ -217,6 +244,7 @@ services:
     restart: unless-stopped
 
   classification_service:
+    image: audio_ingestion_starter-classification_service:latest
     build:
       context: .
       dockerfile: classification/Dockerfile
@@ -248,36 +276,29 @@ services:
 
     restart: unless-stopped
 
-  daily_stats_service:
-    build:
-      context: .
-      dockerfile: stats_service/Dockerfile
+  daily_stats_scheduler:
+    <<: *daily-stats
+    image: audio_ingestion_starter-daily_stats_service:latest
+    container_name: daily-stats-scheduler
+    command: ["python3", "-m", "stats_service.scheduler"]
 
-    container_name: daily-stats-service
+  daily_stats_api:
+    <<: *daily-stats
+    image: audio_ingestion_starter-daily_stats_service:latest
+    container_name: daily-stats-api
+    command:
+      - uvicorn
+      - stats_service.api:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    ports:
+      - "8000:8000"
 
-    networks:
-      - speech
-
-    depends_on:
-      - postgres
-
-    volumes:
-      - ./reports:/reports
-      - ./stats_service:/app/stats_service
-
-    environment:
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
-      POSTGRES_USER: speech
-      POSTGRES_PASSWORD: speech
-      POSTGRES_DB: speech_db
-      REPORT_TIMEZONE: Europe/Moscow
-      REPORT_OUTPUT_DIR: /reports
-      PYTHONUNBUFFERED: 1
-
-    restart: unless-stopped
 
   alert_service:
+    image: audio_ingestion_starter-alert_service:latest
     build:
       context: .
       dockerfile: alert_service/Dockerfile
