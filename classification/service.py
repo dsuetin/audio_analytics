@@ -133,6 +133,9 @@ class ClassificationService:
         client_id = f"client_{len(self.state.clients)}"
         print("client_id", client_id)
         if not self.state.clients:
+            client_id = f"client_{len(self.state.clients)+1}"
+            print("new client_id", client_id)
+            await self.producer.send_and_wait("new_client_session", json.dumps({"type": "new_session"}).encode())
             await self.save_client_id(session_id, client_id)
         client_state = self.state.client(client_id)
         
@@ -142,6 +145,7 @@ class ClassificationService:
 
             print("\n========== NEW CLIENT ==========\n")
             client_id = f"client_{len(self.state.clients)+1}"
+            print("new client_id", client_id)
             client_state = self.state.client(client_id)
             await self.save_client_id(session_id, client_id)
             self.state.threshold_sent = False

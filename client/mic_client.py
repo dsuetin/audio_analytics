@@ -123,7 +123,7 @@ def print_live(text: str):
     sys.stdout.flush()
 
 
-client_sessions = [None]
+client_sessions = []
 
 
 async def kafka_listener():
@@ -152,7 +152,8 @@ async def kafka_listener():
 
             # -------- Classification --------
             if msg.topic == "classified_events":
-                client_sessions[-1] = event["label"]
+                if client_sessions:
+                    client_sessions[-1] = event["label"]
 
                 matched = event.get("matched_words", {})
                 parts = []
@@ -179,8 +180,8 @@ async def kafka_listener():
 
             # -------- New session --------
             if msg.topic == "new_client_session":
-                if client_sessions[-1] is not None:
-                    client_sessions.append(None)
+                print()
+                client_sessions.append(None)
                 logger.info("👤 Client changed -> %s", len(client_sessions))
                 continue
 
@@ -214,11 +215,11 @@ async def kafka_listener():
             if msg.topic == "asr_transcripts":
                 class_icon = ""
 
-                if client_sessions[-1] == "buy":
+                if client_sessions and client_sessions[-1] == "buy":
                     class_icon = "🛍️"
-                elif client_sessions[-1] == "service":
+                elif client_sessions and client_sessions[-1] == "service":
                     class_icon = "🛠️"
-                elif client_sessions[-1] == "return":
+                elif client_sessions and client_sessions[-1] == "return":
                     class_icon = "📦"
 
                 if event["is_final"]:
