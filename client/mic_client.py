@@ -217,14 +217,14 @@ async def kafka_listener():
                 else:
                     with worker_lock:
                         global WORKER_NAME
-                        print("env", event)
+                        # print("env", event)
                         WORKER_NAME = event.get("new_salesperson", WORKER_NAME)
                     icon = "👤"
-                    client_sessions.append(None)
-                    logger.info(
-                        "👤 Client changed -> %s",
-                        len(client_sessions),
-                    )
+                    # client_sessions.append(None)
+                    # logger.info(
+                    #     "👤 Client changed -> %s",
+                    #     len(client_sessions),
+                    # )
                     # остановить текущую микросессию,
                     # чтобы main() сразу создал новую уже с новым WORKER_NAME
                     stop_current_session()

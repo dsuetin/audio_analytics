@@ -135,20 +135,20 @@ class ClassificationService:
         session_state = store_state.session(session_id)
         client_id = f"client_{len(store_state.clients)}"
         print("client_id", client_id)
-        if not store_state.clients:
-            client_id = f"client_{len(store_state.clients)+1}"
-            print("new client_id", client_id)
-            await self.producer.send_and_wait(
-                "new_client_session",
-                json.dumps(
-                    {
-                        "type": "new_session",
-                        "store_id": store_id,
-                        "client_id": client_id,
-                    }
-                ).encode(),
-            )
-            await self.save_client_id(session_id, client_id)
+        # if not store_state.clients:
+        #     client_id = f"client_{len(store_state.clients)+1}"
+        #     print("new client_id", client_id)
+        #     await self.producer.send_and_wait(
+        #         "new_client_session",
+        #         json.dumps(
+        #             {
+        #                 "type": "new_session",
+        #                 "store_id": store_id,
+        #                 "client_id": client_id,
+        #             }
+        #         ).encode(),
+        #     )
+        #     await self.save_client_id(session_id, client_id)
         client_state = store_state.client(client_id)
         
         new_session = store_state.dialog.process(text, is_final)

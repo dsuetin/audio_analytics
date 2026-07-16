@@ -23,7 +23,7 @@ FAREWELLS = (
 class DialogSession:
 
     def __init__(self):
-        self.closed = False
+        self.closed = True
 
     def process(self, text: str, is_final: bool) -> bool:
         """
