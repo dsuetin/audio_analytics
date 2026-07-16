@@ -721,7 +721,7 @@ def write_pdf(
     doc.build(story)
 
 
-async def main() -> None:
+async def main(argv=None) -> None:
     parser = argparse.ArgumentParser(
         description="Export daily transcript rows from PostgreSQL into a readable XLSX report."
     )
@@ -744,7 +744,7 @@ async def main() -> None:
         help="Optional PostgreSQL DSN. If omitted, uses POSTGRES_* environment variables.",
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     report_date = resolve_target_date(args.date, args.timezone)
     zone = ZoneInfo(args.timezone)
