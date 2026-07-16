@@ -41,7 +41,7 @@ configure_logging()
 # ---------------- CONFIG ----------------
 SAMPLE_RATE = 16000
 CHUNK_MS = 150
-STORE_ID = 1
+STORE_ID = "main_store"
 WORKER_NAME = "иванов_иван"
 
 worker_lock = threading.Lock()
@@ -61,6 +61,23 @@ def make_session_id() -> str:
     with worker_lock:
         worker = WORKER_NAME
     return f"{STORE_ID}-{worker}"
+
+
+def event_store_id(event: dict) -> str:
+    if event.get("store_id") is not None:
+        return str(event["store_id"])
+
+    session_id = event.get("session_id", "")
+    parts = session_id.split("-")
+
+    if len(parts) >= 8:
+        return parts[2]
+
+    return parts[0] if parts else ""
+
+
+def event_belongs_to_current_store(event: dict) -> bool:
+    return event_store_id(event) == str(STORE_ID)
 
 
 def set_current_stop_event(ev: threading.Event | None):
@@ -150,6 +167,9 @@ async def kafka_listener():
 
             event = json.loads(raw)
 
+            if not event_belongs_to_current_store(event):
+                continue
+
             # -------- Classification --------
             if msg.topic == "classified_events":
                 if client_sessions:
@@ -182,7 +202,11 @@ async def kafka_listener():
             if msg.topic == "new_client_session":
                 print()
                 client_sessions.append(None)
-                logger.info("👤 Client changed -> %s", len(client_sessions))
+                logger.info(
+                    "👤 Client changed store=%s -> %s",
+                    event.get("store_id", "?"),
+                    len(client_sessions),
+                )
                 continue
 
             # -------- Alerts --------
@@ -198,13 +222,19 @@ async def kafka_listener():
                         WORKER_NAME = event.get("new_salesperson", WORKER_NAME)
                     icon = "👤"
                     client_sessions.append(None)
+                    logger.info(
+                        "👤 Client changed store=%s -> %s",
+                        event.get("store_id", "?"),
+                        len(client_sessions),
+                    )
                     # остановить текущую микросессию,
                     # чтобы main() сразу создал новую уже с новым WORKER_NAME
                     stop_current_session()
 
                 logger.info(
-                    "%s %s | %.3f | %s",
+                    "%s store=%s %s | %.3f | %s",
                     icon,
+                    event.get("store_id", "?"),
                     event["session_id"],
                     event.get("score", 0.0),
                     event.get("text", ""),

@@ -1,17 +1,18 @@
 from .client_state import ClientState
+from .dialog_sessions import DialogSession
 from .session_state import SessionState
 
 
-class StateManager:
+class StoreState:
 
     def __init__(self):
-
         self.clients = {}
         self.sessions = {}
         self.last_label = None
         self.last_score = 0
         self.threshold_sent = False
         self.active_sessions: set[str] = set()
+        self.dialog = DialogSession()
 
     def client(self, client_id):
 
@@ -34,3 +35,15 @@ class StateManager:
     def reset_client(self, client_id):
 
         self.clients.pop(client_id, None)
+
+
+class StateManager:
+
+    def __init__(self):
+        self.stores = {}
+
+    def store(self, store_id):
+        if store_id not in self.stores:
+            self.stores[store_id] = StoreState()
+
+        return self.stores[store_id]

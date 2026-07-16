@@ -7,6 +7,7 @@ from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from alert_service.telegram_bot import TelegramBot
+from alert_service.metadata import parse_session_metadata
 
 
 TRIGGER_THRESHOLD = 0.90
@@ -169,6 +170,8 @@ class AlertService:
         )
 
         session_id = event.get("session_id")
+        metadata = parse_session_metadata(event)
+        store_id = metadata["store_id"]
         text = event.get("text", "")
         print(f"Received event: {event}")
         scores = self.detect_scores(
@@ -190,6 +193,7 @@ class AlertService:
 
             payload = {
                 "session_id": session_id,
+                "store_id": store_id,
                 "text": text,
                 "score": scores["objection"],
                 "type": "objection_trigger",
@@ -200,6 +204,7 @@ class AlertService:
                 self.save_alarm(session_id),
                 self.send_telegram(
                     f"🚨 Alert\n\n"
+                    f"Store: {store_id}\n"
                     f"Session: {session_id}\n"
                     f"Phrase:\n{text}\n\n"
                     f"Score: {scores['objection']:.3f}"
@@ -220,6 +225,7 @@ class AlertService:
 
             payload = {
                 "session_id": session_id,
+                "store_id": store_id,
                 "text": text,
                 "score": scores["purchase"],
                 "type": "purchase",
@@ -246,6 +252,7 @@ class AlertService:
 
             payload = {
                 "session_id": session_id,
+                "store_id": store_id,
                 "text": text,
                 "score": scores["salesperson"],
                 "type": "salesperson_change",

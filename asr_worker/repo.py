@@ -7,14 +7,16 @@ import asyncpg
 def parse_session_id(session_id: str):
     parts = session_id.split("-")
 
-    date = parts[0]
-    time = parts[1]
-    store_id = parts[2]
+    if len(parts) >= 8:
+        store_id = parts[2]
 
-    uuid_str = "-".join(parts[-5:])
-    UUID(uuid_str)  # проверка, что UUID корректный
+        uuid_str = "-".join(parts[-5:])
+        UUID(uuid_str)  # проверка, что UUID корректный
 
-    seller_id = "-".join(parts[3:-5])
+        seller_id = "-".join(parts[3:-5])
+    else:
+        store_id = parts[0] if parts else ""
+        seller_id = "-".join(parts[1:])
 
     return {
         "store_id": store_id,

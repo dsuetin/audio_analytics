@@ -13,7 +13,7 @@ from .classifier import (
     best_label,
     threshold_hit,
 )
-from .dialog_sessions import DialogSession
+from .metadata import parse_session_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +49,6 @@ class ClassificationService:
 
         # self.sessions: dict[str, SessionState] = {}
         self.state = StateManager()
-        self.dialog = DialogSession()
 
     async def start(self):
 
@@ -93,10 +92,12 @@ class ClassificationService:
         ret,
         svc,
         matched_words,
+        store_id,
     ):
         print("emit", session_id, chunk_id, is_final, text, label, mode, buy, ret, svc)
         event = {
             "session_id": session_id,
+            "store_id": store_id,
             "chunk_id": chunk_id,
             "is_final": is_final,           
             "text": text,
@@ -124,40 +125,59 @@ class ClassificationService:
         event = json.loads(raw)
 
         session_id = event["session_id"]
+        metadata = parse_session_metadata(event)
+        store_id = metadata["store_id"]
         text = event.get("text", "")
         chunk_id = event.get("chunk_id")
         is_final = event.get("is_final", False)
 
-
-        session_state = self.state.session(session_id)
-        client_id = f"client_{len(self.state.clients)}"
+        store_state = self.state.store(store_id)
+        session_state = store_state.session(session_id)
+        client_id = f"client_{len(store_state.clients)}"
         print("client_id", client_id)
-        if not self.state.clients:
-            client_id = f"client_{len(self.state.clients)+1}"
+        if not store_state.clients:
+            client_id = f"client_{len(store_state.clients)+1}"
             print("new client_id", client_id)
-            await self.producer.send_and_wait("new_client_session", json.dumps({"type": "new_session"}).encode())
+            await self.producer.send_and_wait(
+                "new_client_session",
+                json.dumps(
+                    {
+                        "type": "new_session",
+                        "store_id": store_id,
+                        "client_id": client_id,
+                    }
+                ).encode(),
+            )
             await self.save_client_id(session_id, client_id)
-        client_state = self.state.client(client_id)
+        client_state = store_state.client(client_id)
         
-        new_session = self.dialog.process(text, is_final)
+        new_session = store_state.dialog.process(text, is_final)
 
         if new_session:
 
             print("\n========== NEW CLIENT ==========\n")
-            client_id = f"client_{len(self.state.clients)+1}"
+            client_id = f"client_{len(store_state.clients)+1}"
             print("new client_id", client_id)
-            client_state = self.state.client(client_id)
+            client_state = store_state.client(client_id)
             await self.save_client_id(session_id, client_id)
-            self.state.threshold_sent = False
-            self.state.last_label = None
-            self.state.last_score = 0
-            await self.producer.send_and_wait("new_client_session", json.dumps({"type": "new_session"}).encode()
-        )
+            store_state.threshold_sent = False
+            store_state.last_label = None
+            store_state.last_score = 0
+            await self.producer.send_and_wait(
+                "new_client_session",
+                json.dumps(
+                    {
+                        "type": "new_session",
+                        "store_id": store_id,
+                        "client_id": client_id,
+                    }
+                ).encode()
+            )
 
         if is_final:
-            self.state.active_sessions.discard(session_id)
+            store_state.active_sessions.discard(session_id)
         else:
-            self.state.active_sessions.add(session_id)
+            store_state.active_sessions.add(session_id)
 
         #
         # обновляем гистограмму
@@ -165,8 +185,8 @@ class ClassificationService:
         update(client_state, session_state, text, is_final)
         working = client_state.confirmed.copy()
 
-        for sid in self.state.active_sessions:
-            working += self.state.session(sid).partial
+        for sid in store_state.active_sessions:
+            working += store_state.session(sid).partial
 
         print("\nWORKING:")
         buy, ret, svc, matched_words = score(working)
@@ -192,7 +212,7 @@ class ClassificationService:
         # threshold
         if (
             threshold_hit(buy, ret, svc)
-            and not self.state.threshold_sent
+            and not store_state.threshold_sent
         ):
             print("emit", session_id, text, label, "threshold", buy, ret, svc,)
             await self.emit(
@@ -206,19 +226,20 @@ class ClassificationService:
                 ret,
                 svc,
                 matched_words,
+                store_id,
             )
 
-            self.state.threshold_sent = True
-            self.state.last_label = label
-            self.state.last_score = score_value
+            store_state.threshold_sent = True
+            store_state.last_label = label
+            store_state.last_score = score_value
             await self.save_dialog_type(session_id, label)
 
         
         # смена сценария
         
-        if (self.state.threshold_sent
-            and label != self.state.last_label
-            and score_value > self.state.last_score):
+        if (store_state.threshold_sent
+            and label != store_state.last_label
+            and score_value > store_state.last_score):
 
             await self.emit(
                 session_id,
@@ -231,10 +252,11 @@ class ClassificationService:
                 ret,
                 svc,
                 matched_words,
+                store_id,
             )
 
-            self.state.last_label = label
-            self.state.last_score = score_value
+            store_state.last_label = label
+            store_state.last_score = score_value
             await self.save_dialog_type(session_id, label)
 
         

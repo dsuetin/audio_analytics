@@ -7,7 +7,7 @@ from collections import defaultdict
 
 from asr_worker.consumer import KafkaConsumerWrapper
 from asr_worker.producer import KafkaProducerWrapper
-from asr_worker.repo import TranscriptRepository
+from asr_worker.repo import TranscriptRepository, parse_session_id
 from asr_worker.s3_client import S3Client
 from asr_worker.session_buffer import SessionBuffer
 from asr_worker.triton_client import TritonASRClient
@@ -81,10 +81,13 @@ class ASRWorker:
             # print("Processing ASR event:", event)
 
             try:
+                meta = parse_session_id(event["session_id"])
                 await self.producer.send(
                     "asr_transcripts",
                     {
                         "session_id": event["session_id"],
+                        "store_id": meta["store_id"],
+                        "seller_id": meta["seller_id"],
                         "chunk_id": event["chunk_id"],
                         "text": event["text"],
                         "is_final": event["is_final"],
