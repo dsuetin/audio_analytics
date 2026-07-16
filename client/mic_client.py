@@ -203,8 +203,7 @@ async def kafka_listener():
                 print()
                 client_sessions.append(None)
                 logger.info(
-                    "👤 Client changed store=%s -> %s",
-                    event.get("store_id", "?"),
+                    "👤 Client changed -> %s",
                     len(client_sessions),
                 )
                 continue
@@ -223,8 +222,7 @@ async def kafka_listener():
                     icon = "👤"
                     client_sessions.append(None)
                     logger.info(
-                        "👤 Client changed store=%s -> %s",
-                        event.get("store_id", "?"),
+                        "👤 Client changed -> %s",
                         len(client_sessions),
                     )
                     # остановить текущую микросессию,
