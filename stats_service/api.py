@@ -1,12 +1,12 @@
 from datetime import date
 from pathlib import Path
 from zipfile import ZipFile, ZIP_DEFLATED
+import subprocess
+import sys
 import os
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
-
-from stats_service.export_daily_transcript_report import main
 
 app = FastAPI()
 
@@ -26,11 +26,23 @@ def generate_report(report_date: date):
         exist_ok=True,
     )
 
-    # Генерируем отчет
-    main([
-        "--date",
-        report_date.isoformat(),
-    ])
+    result = subprocess.run(
+        [
+            sys.executable,
+            "stats_service/scheduler.py",
+            "--once",
+            "--date",
+            report_date.isoformat(),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        raise HTTPException(
+            status_code=500,
+            detail=result.stderr or result.stdout,
+        )
 
     prefix = f"transcript_report_{report_date.isoformat()}"
 
@@ -51,16 +63,8 @@ def generate_report(report_date: date):
         "w",
         compression=ZIP_DEFLATED,
     ) as archive:
-
-        archive.write(
-            xlsx_path,
-            arcname=xlsx_path.name,
-        )
-
-        archive.write(
-            pdf_path,
-            arcname=pdf_path.name,
-        )
+        archive.write(xlsx_path, arcname=xlsx_path.name)
+        archive.write(pdf_path, arcname=pdf_path.name)
 
     return FileResponse(
         path=zip_path,
