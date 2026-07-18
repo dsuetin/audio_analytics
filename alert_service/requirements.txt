@@ -1,3 +1,4 @@
 aiokafka==0.14.0
 asyncpg==0.31.0
-sentence-transformers
+snowballstemmer
+requests==2.34.2

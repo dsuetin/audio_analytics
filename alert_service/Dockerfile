@@ -12,9 +12,9 @@ COPY alert_service/requirements.txt .
 # RUN pip install --upgrade pip setuptools wheel
 RUN pip install --no-cache-dir -r requirements.txt
 
-RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
+# RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
 # COPY . .
-RUN pip install requests==2.34.2
+# RUN pip install requests==2.34.2
 ENV PYTHONUNBUFFERED=1
 
 CMD ["python", "-m", "alert_service.alerts_service"]
