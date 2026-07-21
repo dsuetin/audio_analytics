@@ -65,13 +65,12 @@ def merge_text(series):
         if pd.isna(text):
             continue
 
-        text = str(text).strip()
+        text = " ".join(str(text).split())
 
         if text:
-            parts.append(text)
+            parts.append(text + " ")
 
-    return " ".join(parts)
-
+    return "\n".join(parts)
 
 def contains_any(text: str, phrases) -> bool:
     if pd.isna(text):
@@ -411,11 +410,20 @@ def main():
                 .dt.tz_localize(None)
             )
 
+        with pd.ExcelWriter(OUTPUT_FILE, engine="openpyxl") as writer:
+            out.to_excel(
+                writer,
+                index=False,
+                sheet_name="report",
+            )
 
-    out.to_excel(
-        OUTPUT_FILE,
-        index=False,
-    )
+            ws = writer.sheets["report"]
+
+            for row in ws.iter_rows():
+                for cell in row:
+                    cell.alignment = cell.alignment.copy(
+                        wrap_text=True
+                    )
 
 
     print(
