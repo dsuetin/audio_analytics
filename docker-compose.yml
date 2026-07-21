@@ -282,6 +282,8 @@ services:
     container_name: daily-stats-scheduler
     command: ["python3", "-m", "stats_service.scheduler"]
 
+    restart: unless-stopped
+
   daily_stats_api:
     <<: *daily-stats
     image: audio_ingestion_starter-daily_stats_service:latest
@@ -295,6 +297,8 @@ services:
       - "8000"
     ports:
       - "8000:8000"
+
+    restart: unless-stopped
 
 
   alert_service:

@@ -56,12 +56,17 @@ class AlertService:
         # чтобы одно событие не стреляло 100 раз
         self.fired_sessions = set()
         self.purchase_sessions = set()
-        self.salesperson_sessions = set()
+        self.pending_salesperson = set()
 
 
-        self.telegram = TelegramBot(
-            os.getenv("TELEGRAM_TOKEN")
-        )
+        token = os.getenv("TELEGRAM_TOKEN")
+        if not token:
+            raise RuntimeError("TELEGRAM_TOKEN is not set in environment variables")
+        
+        print("token", token)
+
+        self.telegram = TelegramBot(token)
+        
 
         self.telegram_chat_id = os.getenv(
             "TELEGRAM_CHAT_ID",
@@ -293,46 +298,53 @@ class AlertService:
             text,
             SALESPERSON_PHRASES,
         )
+        if phrase:
+            self.pending_salesperson.add(session_id)
 
-
+        #
+        # ждем финальную фразу
+        #
         if (
-            phrase
-            and session_id not in self.salesperson_sessions
+            event.get("is_final")
+            and session_id in self.pending_salesperson
         ):
 
-            self.salesperson_sessions.add(session_id)
+            self.pending_salesperson.remove(session_id)
 
+            words = text.lower().split()
 
-            name = "_".join(
-                text.split()[-2:]
-            )
+            for i in range(len(words) - 3):
+                if (
+                    words[i] == "имя"
+                    and words[i + 1] in ("продавца", "консультанта")
+                ):
+                    name = "_".join(words[i + 2:i + 4])
 
+                    payload = {
+                        "session_id": session_id,
+                        "store_id": store_id,
+                        "text": text,
+                        "type": "salesperson_change",
+                        "new_salesperson": name,
+                    }
 
-            payload = {
-                "session_id": session_id,
-                "store_id": store_id,
-                "text": text,
-                "type": "salesperson_change",
-                "new_salesperson": name,
-            }
+                    await asyncio.gather(
+                        self.emit(
+                            self.salesperson_topic,
+                            payload,
+                        ),
+                        self.save_salesperson_change(
+                            session_id,
+                            name,
+                        ),
+                    )
 
+                    logger.info(
+                        "👤 SALESPERSON %s",
+                        payload,
+                    )
 
-            await asyncio.gather(
-                self.emit(
-                    self.salesperson_topic,
-                    payload,
-                ),
-                self.save_salesperson_change(
-                    session_id,
-                    name,
-                ),
-            )
-
-
-            logger.warning(
-                "👤 SALESPERSON %s",
-                payload,
-            )
+                    break
 
 
     async def run(self):
