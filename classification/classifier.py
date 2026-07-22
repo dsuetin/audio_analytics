@@ -1,83 +1,120 @@
 from collections import Counter
 
-from .policy import (
-    BUY_KEYWORDS,
-    RETURN_KEYWORDS,
-    SERVICE_KEYWORDS,
-)
-
-
+from .policy import MISSIONS, THRESHOLD
 from .phrase_matcher import find_phrases
 
 
-def update(client_state, session_state, text, is_final):
+#
+# MISSIONS:
+#
+# {
+#   "buy": [
+#       "фраза1",
+#       "фраза2"
+#   ],
+#   ...
+# }
+#
+# Собираем обратный индекс:
+# фраза -> миссия
+#
+PHRASE_TO_MISSION = {}
 
-    all_keywords = BUY_KEYWORDS.union(RETURN_KEYWORDS).union(SERVICE_KEYWORDS)
-    phrases = find_phrases(
+for mission, phrases in MISSIONS.items():
+    for phrase in phrases:
+        PHRASE_TO_MISSION[phrase] = mission
+
+
+ALL_PHRASES = list(PHRASE_TO_MISSION.keys())
+
+
+def update(
+    client_state,
+    session_state,
+    text,
+    is_final,
+):
+
+    found = find_phrases(
         text,
-        all_keywords,
+        ALL_PHRASES,
     )
-    session_state.partial = phrases
+
+    #
+    # сохраняем гистограмму фраз
+    #
+    session_state.partial = Counter(found)
+
     if is_final:
         client_state.confirmed += session_state.partial
         session_state.partial.clear()
+
 
 
 def score(histogram: Counter):
 
     print("\n========== HISTOGRAM ==========")
 
-    for word, count in histogram.most_common():
-        print(f"{word:20} {count}")
+    for phrase, count in histogram.most_common():
+        print(
+            f"{phrase:50} {count}"
+        )
 
     print("===============================\n")
 
-    buy = 0
-    ret = 0
-    svc = 0
-    buy_words = {}
-    return_words = {}
-    service_words = {}
-
-    for word, count in histogram.items():
-
-        if word in BUY_KEYWORDS:
-            buy += count
-            buy_words[word] = count
-
-        if word in RETURN_KEYWORDS:
-            ret += count
-            return_words[word] = count
-
-        if word in SERVICE_KEYWORDS:
-            svc += count
-            service_words[word] = count
-
-    return (
-        buy,
-        ret,
-        svc,
-        {
-            "buy": buy_words,
-            "return": return_words,
-            "service": service_words,
-        },
-    )
-
-
-def best_label(buy, ret, svc):
 
     scores = {
-        "buy": buy,
-        "return": ret,
-        "service": svc,
+        mission: 0
+        for mission in MISSIONS.keys()
     }
 
-    label, _ = max(scores.items(), key=lambda item: item[1])
+    matched = {
+        mission: {}
+        for mission in MISSIONS.keys()
+    }
 
-    return label, scores[label]
+
+    #
+    # считаем очки каждой миссии
+    #
+    for phrase, count in histogram.items():
+
+        mission = PHRASE_TO_MISSION.get(
+            phrase
+        )
+
+        if mission is None:
+            continue
 
 
-def threshold_hit(buy, ret, svc):
+        scores[mission] += count
 
-    return max(buy, ret, svc) >= 5
+        matched[mission][phrase] = count
+
+
+
+    return scores, matched
+
+
+
+def best_label(scores: dict[str, int]):
+
+    if not scores:
+        return None, 0
+
+
+    label, value = max(
+        scores.items(),
+        key=lambda x: x[1],
+    )
+
+    return label, value
+
+
+
+def threshold_hit(scores: dict[str, int]):
+
+    return max(
+        scores.values(),
+        default=0,
+    ) >= THRESHOLD

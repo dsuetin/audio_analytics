@@ -88,13 +88,11 @@ class ClassificationService:
         text,
         label,
         mode,
-        buy,
-        ret,
-        svc,
+        scores,
         matched_words,
         store_id,
     ):
-        print("emit", session_id, chunk_id, is_final, text, label, mode, buy, ret, svc)
+        print("emit", session_id, chunk_id, is_final, text, label, mode, scores)
         event = {
             "session_id": session_id,
             "store_id": store_id,
@@ -102,13 +100,9 @@ class ClassificationService:
             "is_final": is_final,           
             "text": text,
             "label": label,
-            "score": max(buy, ret, svc),
+            "score": max(scores.values()) if scores else 0,
             "mode": mode,
-            "counters": {
-                "buy": buy,
-                "return": ret,
-                "service": svc,
-            },
+            "counters": scores,
             "matched_words": matched_words,
         }
 
@@ -178,32 +172,25 @@ class ClassificationService:
             working += store_state.session(sid).partial
 
         print("\nWORKING:")
-        buy, ret, svc, matched_words = score(working)
-        print("session buy, ret, svc", buy, ret, svc)
+        scores, matched_words = score(working)
+        print("session buy, ret, svc", scores)
 
-        label, score_value = best_label(
-            buy,
-            ret,
-            svc,
-        )
-
+        label, score_value = best_label(scores)
         print("best label", label, score_value)
 
         logger.info(
-            "session=%s buy=%s return=%s service=%s label=%s",
+            "session=%s scores=%s label=%s",
             session_id,
-            buy,
-            ret,
-            svc,
+            scores,
             label,
         )
 
         # threshold
         if (
-            threshold_hit(buy, ret, svc)
+            threshold_hit(scores)
             and not store_state.threshold_sent
         ):
-            print("emit", session_id, text, label, "threshold", buy, ret, svc,)
+            print("emit", session_id, text, label, "threshold", scores)
             await self.emit(
                 session_id,
                 chunk_id,
@@ -211,9 +198,7 @@ class ClassificationService:
                 text,
                 label,
                 "threshold",
-                buy,
-                ret,
-                svc,
+                scores,
                 matched_words,
                 store_id,
             )
@@ -237,9 +222,7 @@ class ClassificationService:
                 text,
                 label,
                 "switch",
-                buy,
-                ret,
-                svc,
+                scores,
                 matched_words,
                 store_id,
             )
