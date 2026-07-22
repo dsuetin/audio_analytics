@@ -133,52 +133,41 @@ class ClassificationService:
 
         store_state = self.state.store(store_id)
         session_state = store_state.session(session_id)
-        client_id = f"client_{len(store_state.clients)}"
-        print("client_id", client_id)
-        # if not store_state.clients:
-        #     client_id = f"client_{len(store_state.clients)+1}"
-        #     print("new client_id", client_id)
-        #     await self.producer.send_and_wait(
-        #         "new_client_session",
-        #         json.dumps(
-        #             {
-        #                 "type": "new_session",
-        #                 "store_id": store_id,
-        #                 "client_id": client_id,
-        #             }
-        #         ).encode(),
-        #     )
-        #     await self.save_client_id(session_id, client_id)
-        client_state = store_state.client(client_id)
-        
+        client_state = store_state.client(store_state.current_client_id)
         new_session = store_state.dialog.process(text, is_final)
 
         if new_session:
 
             print("\n========== NEW CLIENT ==========\n")
             client_id = f"client_{len(store_state.clients)+1}"
+            store_state.current_client_id = client_id
             print("new client_id", client_id)
             client_state = store_state.client(client_id)
             await self.save_client_id(session_id, client_id)
             store_state.threshold_sent = False
             store_state.last_label = None
             store_state.last_score = 0
-            await self.producer.send_and_wait(
-                "new_client_session",
-                json.dumps(
-                    {
-                        "type": "new_session",
-                        "store_id": store_id,
-                        "client_id": client_id,
-                    }
-                ).encode()
-            )
-
+            if self.producer is not None and not isinstance(self.producer, type(None)):
+                await self.producer.send_and_wait(
+                    "new_client_session",
+                    json.dumps(
+                        {
+                            "type": "new_session",
+                            "store_id": store_id,
+                            "client_id": client_id,
+                        }
+                    ).encode()
+                )
+            else:
+                logger.error("Producer is not initialized or is None")
+        
         if is_final:
             store_state.active_sessions.discard(session_id)
         else:
             store_state.active_sessions.add(session_id)
 
+        if not client_state:
+            return None
         #
         # обновляем гистограмму
         #
@@ -304,9 +293,7 @@ class ClassificationService:
             if self.db:
                 await self.db.close()
 
-            
-
-
+    
 def main():
     service = ClassificationService()
     asyncio.run(service.run())

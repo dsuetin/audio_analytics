@@ -7,14 +7,19 @@ from .policy import (
 )
 
 
+from .phrase_matcher import find_phrases
+
+
 def update(client_state, session_state, text, is_final):
 
-    words = Counter(text.lower().split())
-
-    session_state.partial = words
-
+    all_keywords = BUY_KEYWORDS.union(RETURN_KEYWORDS).union(SERVICE_KEYWORDS)
+    phrases = find_phrases(
+        text,
+        all_keywords,
+    )
+    session_state.partial = phrases
     if is_final:
-        client_state.confirmed += words
+        client_state.confirmed += session_state.partial
         session_state.partial.clear()
 
 
@@ -68,7 +73,7 @@ def best_label(buy, ret, svc):
         "service": svc,
     }
 
-    label = max(scores, key=scores.get)
+    label, _ = max(scores.items(), key=lambda item: item[1])
 
     return label, scores[label]
 

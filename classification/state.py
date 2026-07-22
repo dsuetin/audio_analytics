@@ -13,8 +13,12 @@ class StoreState:
         self.threshold_sent = False
         self.active_sessions: set[str] = set()
         self.dialog = DialogSession()
+        self.current_client_id = None
 
     def client(self, client_id):
+
+        if client_id is None:
+            return None
 
         if client_id not in self.clients:
             self.clients[client_id] = ClientState()
