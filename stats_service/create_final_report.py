@@ -1,7 +1,7 @@
-from pathlib import Path
-
 import pandas as pd
+import snowballstemmer
 
+stemmer = snowballstemmer.stemmer("russian")
 
 INPUT_FILE = "reports/transcript_report_2026-07-17.xlsx"
 OUTPUT_FILE = "reports/final_transcript_report_2026-07-17.xlsx"
@@ -27,6 +27,148 @@ FAREWELLS = (
     "хорошего вечера",
     "заходите еще",
 )
+
+LOSS_SCENARIOS = {
+
+    "Не устроила цена": [
+        "поищу подешевле",
+        "другом магазине дешевле",
+        "все дорого",
+        "всё дорого",
+        "нет столько денег",
+        "нет денег",
+        "нет таких денег",
+        "нужно посоветоваться",
+        "я подумаю",
+        "надо посоветоваться",
+        "на другую сумму рассчитывал",
+        "поеду посмотрю еще",
+        "если что вернусь",
+        "прочитаю отзывы",
+        "до зарплаты",
+        "пенсия",
+        "через пару месяцев",
+        "через пару недель",
+        "через пару дней",
+        "потом приеду",
+        "хочу поискать",
+    ],
+
+
+    "В магазине не оказалось нужного количества или модели": [
+        "где найти",
+        "у вас нет",
+        "нету нужной",
+        "когда будет в наличии",
+        "где еще может продаваться",
+        "заказать можете",
+        "можете заказать",
+        "мне нужна именно",
+        "заказать со склада",
+        "нет в наличии",
+        "посмотрю по программе",
+        "позвоню на другой магазин",
+        "посмотрю на ближайшем",
+        "можем привезти",
+        "хороший аналог",
+        "есть на складе",
+        "покажу варианты",
+        "проверю по программе",
+    ],
+
+
+    "Получил консультацию/провел мониторинг цен/ассортимента и ушел": [
+        "подумаю",
+        "подумать",
+        "присматриваю",
+        "покупать не буду",
+        "спасибо за консультацию",
+        "просто хотел цены посмотреть",
+        "у ваших конкурентов",
+        "у конкурентов",
+        "не буду брать",
+        "прицениваюсь",
+        "прицениться",
+        "после зарплаты",
+        "просто смотрю",
+        "деньги не брал",
+        "просто посмотреть",
+        "приеду позже",
+        "буду иметь в виду",
+        "посмотрю еще",
+    ],
+}
+
+
+
+def normalize_text(text: str):
+    words = (
+        str(text)
+        .lower()
+        .replace(",", " ")
+        .replace(".", " ")
+        .split()
+    )
+
+    return stemmer.stemWords(words)
+
+
+def normalize_phrase(phrase: str):
+    return " ".join(
+        stemmer.stemWords(
+            phrase.lower().split()
+        )
+    )
+
+
+def contains_phrase(text: str, phrase: str):
+
+    text_words = normalize_text(text)
+    phrase_words = normalize_phrase(phrase).split()
+
+    if len(phrase_words) > len(text_words):
+        return False
+
+    for i in range(len(text_words) - len(phrase_words) + 1):
+
+        window = text_words[
+            i:i + len(phrase_words)
+        ]
+
+        if window == phrase_words:
+            return True
+
+    return False
+
+
+LOSS_SCENARIOS_LEMMA = {
+    name: [
+        normalize_phrase(p)
+        for p in phrases
+    ]
+    for name, phrases in LOSS_SCENARIOS.items()
+}
+
+
+def detect_loss_reason(text: str, is_sale: bool):
+
+    if is_sale:
+        return "Покупка"
+
+
+    for scenario, phrases in LOSS_SCENARIOS_LEMMA.items():
+
+        for phrase in phrases:
+
+            if contains_phrase(
+                text,
+                phrase,
+            ):
+                return scenario
+
+
+    return None
+
 
 def first_not_empty(series):
     series = series.dropna()
@@ -151,7 +293,6 @@ def process_sheet(store_id: str, df: pd.DataFrame):
     df = df.copy()
 
 
-    # сохраняем логику рабочего варианта
     df["client_id_effective"] = (
         df["client_id"]
         .ffill()
@@ -182,6 +323,11 @@ def process_sheet(store_id: str, df: pd.DataFrame):
             .fillna("")
             .astype(str)
             .tolist()
+        )
+
+
+        merged_text = merge_text(
+            group["recognition_text"]
         )
 
 
@@ -253,7 +399,6 @@ def process_sheet(store_id: str, df: pd.DataFrame):
         )
 
 
-        # новые данные
         session_ids = []
 
         if "session_id" in group.columns:
@@ -267,9 +412,28 @@ def process_sheet(store_id: str, df: pd.DataFrame):
             )
 
 
+        is_sale = bool(
+            sale_series.any()
+        )
+
+
+        # определяем причину ухода
+        loss_reason = None
+
+        if (
+            group["dialog_type"].astype(str)
+            .str.lower()
+            .eq("buy")
+            .any()
+        ):
+
+            loss_reason = detect_loss_reason(
+                merged_text, is_sale
+            )
+
+
         result.append(
             {
-
                 "store_id": store_id,
 
                 "seller_id": (
@@ -280,15 +444,7 @@ def process_sheet(store_id: str, df: pd.DataFrame):
 
                 "client_id": client_id,
 
-
-                "recognition_text": (
-                    merge_text(
-                        group["recognition_text"]
-                    )
-                    if "recognition_text" in group.columns
-                    else ""
-                ),
-
+                "recognition_text": merged_text,
 
                 "dialog_type": (
                     last_not_empty(
@@ -298,16 +454,13 @@ def process_sheet(store_id: str, df: pd.DataFrame):
                     else None
                 ),
 
+                "is_sale": is_sale,
 
-                "is_sale": bool(
-                    sale_series.any()
-                ),
-
+                "loss_reason": loss_reason,
 
                 "is_alarm_triggered": bool(
                     alarm_series.any()
                 ),
-
 
                 "dialog_start_at": dialog_start_at,
 
@@ -315,17 +468,14 @@ def process_sheet(store_id: str, df: pd.DataFrame):
 
                 "dialog_duration_sec": dialog_duration_sec,
 
-
                 "session_ids": ", ".join(
                     session_ids
                 ),
-
             }
         )
 
 
     return result
-
 
 
 def create_final_report(input_file: str, output_file: str):
@@ -371,6 +521,8 @@ def create_final_report(input_file: str, output_file: str):
         "dialog_type",
 
         "is_sale",
+
+        "loss_reason",
 
         "is_alarm_triggered",
 
