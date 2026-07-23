@@ -317,7 +317,6 @@ def process_sheet(store_id: str, df: pd.DataFrame):
             kind="stable",
         ).reset_index(drop=True)
 
-
         texts = (
             group["recognition_text"]
             .fillna("")
@@ -325,21 +324,37 @@ def process_sheet(store_id: str, df: pd.DataFrame):
             .tolist()
         )
 
-
-        merged_text = merge_text(
-            group["recognition_text"]
-        )
-
-
         start_idx = first_match_index(
             texts,
             GREETINGS,
         )
 
-
         end_idx = last_match_index(
             texts,
             FAREWELLS,
+        )
+
+        #
+        # После последнего "до свидания" все отбрасываем
+        #
+        if end_idx is not None:
+
+            group_for_report = (
+                group.iloc[: end_idx + 1]
+                .copy()
+                .reset_index(drop=True)
+            )
+
+        else:
+
+            group_for_report = (
+                group.copy()
+                .reset_index(drop=True)
+            )
+
+
+        merged_text = merge_text(
+            group_for_report["recognition_text"]
         )
 
 
@@ -360,14 +375,14 @@ def process_sheet(store_id: str, df: pd.DataFrame):
         else:
 
             dialog_start_at = (
-                group["created_at"].iloc[0]
-                if "created_at" in group.columns
+                group_for_report["created_at"].iloc[0]
+                if "created_at" in group_for_report.columns
                 else None
             )
 
             dialog_end_at = (
-                group["created_at"].iloc[-1]
-                if "created_at" in group.columns
+                group_for_report["created_at"].iloc[-1]
+                if "created_at" in group_for_report.columns
                 else None
             )
 
@@ -386,16 +401,15 @@ def process_sheet(store_id: str, df: pd.DataFrame):
 
 
         sale_series = (
-            to_bool_series(group["is_sale"])
-            if "is_sale" in group.columns
-            else pd.Series([False] * len(group))
+            to_bool_series(group_for_report["is_sale"])
+            if "is_sale" in group_for_report.columns
+            else pd.Series([False] * len(group_for_report))
         )
 
-
         alarm_series = (
-            to_bool_series(group["is_alarm_triggered"])
-            if "is_alarm_triggered" in group.columns
-            else pd.Series([False] * len(group))
+            to_bool_series(group_for_report["is_alarm_triggered"])
+            if "is_alarm_triggered" in group_for_report.columns
+            else pd.Series([False] * len(group_for_report))
         )
 
 
@@ -404,7 +418,7 @@ def process_sheet(store_id: str, df: pd.DataFrame):
         if "session_id" in group.columns:
 
             session_ids = (
-                group["session_id"]
+                group_for_report["session_id"]
                 .dropna()
                 .astype(str)
                 .unique()
