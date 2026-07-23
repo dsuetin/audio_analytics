@@ -15,12 +15,26 @@ import json
 
 from aiokafka import AIOKafkaConsumer
 
+import signal
+
 # SERVER_IP = "10.201.0.9"
 # SERVER_IP = "192.168.0.10"
 SERVER_IP = "localhost"
 
 KAFKA_BOOTSTRAP = f"{SERVER_IP}:19092"
 GRPC_ADDR = f"{SERVER_IP}:6000"
+
+CLASS_ICONS = {
+    "buy": "🛒",             # покупка
+    "service": "🔧",         # сервис
+    "complaint": "⚠️",       # рекламация / жалоба
+    "corporate": "🏢",       # корпоративные продажи
+    "working_hours": "🕒",   # режим работы
+    "vacancy": "💼",         # вакансии
+    "help": "❓",            # справка / помощь
+    "lost": "🧭",            # потерянные вещи
+    "other": "💬",           # прочее
+}
 
 
 # ---------------- LOGGING ----------------
@@ -47,9 +61,13 @@ WORKER_NAME = "иванов_иван"
 worker_lock = threading.Lock()
 current_stop_event_lock = threading.Lock()
 current_stop_event = None  # type: threading.Event | None
-
+shutdown_event = threading.Event()
 audio_queue = queue.Queue()
 
+def handle_shutdown(signum, frame):
+    logger.info("Received signal %s", signum)
+    shutdown_event.set()
+    stop_current_session()
 
 def audio_callback(indata, frames, time, status):
     if status:
@@ -160,112 +178,105 @@ async def kafka_listener():
     logger.info("Kafka consumer started")
 
     try:
-        async for msg in consumer:
-            raw = msg.value
-            if isinstance(raw, bytes):
-                raw = raw.decode("utf-8")
+        while not shutdown_event.is_set():
+            batches = await consumer.getmany(timeout_ms=50)
 
-            event = json.loads(raw)
+            for _, messages in batches.items():
+                for msg in messages:
+                    raw = msg.value
+                    if isinstance(raw, bytes):
+                        raw = raw.decode("utf-8")
 
-            if not event_belongs_to_current_store(event):
-                continue
+                    event = json.loads(raw)
 
-            # -------- Classification --------
-            if msg.topic == "classified_events":
-                if client_sessions:
-                    client_sessions[-1] = event["label"]
+                    if not event_belongs_to_current_store(event):
+                        continue
 
-                matched = event.get("matched_words", {})
-                parts = []
-                for category, words in matched.items():
-                    if words:
-                        parts.append(
-                            f"{category}: "
-                            + ", ".join(
-                                f"{w}({c})"
-                                for w, c in sorted(
-                                    words.items(),
-                                    key=lambda x: x[1],
-                                    reverse=True,
+                    # -------- Classification --------
+                    if msg.topic == "classified_events":
+                        if client_sessions:
+                            client_sessions[-1] = event["label"]
+
+                        matched = event.get("matched_words", {})
+                        parts = []
+                        for category, words in matched.items():
+                            if words:
+                                parts.append(
+                                    f"{category}: "
+                                    + ", ".join(
+                                        f"{w}({c})"
+                                        for w, c in sorted(
+                                            words.items(),
+                                            key=lambda x: x[1],
+                                            reverse=True,
+                                        )
+                                    )
                                 )
-                            )
+                        print(
+                            "%s | %s",
+                            event["label"],
+                            " | ".join(parts),
                         )
+                        continue
 
-                logger.info(
-                    "%s | %s",
-                    event["label"],
-                    " | ".join(parts),
-                )
-                continue
+                    # -------- New session --------
+                    if msg.topic == "new_client_session":
+                        print()
+                        client_sessions.append(None)
+                        print(
+                            "👤 Client changed -> ",
+                            len(client_sessions),
+                        )
+                        continue
 
-            # -------- New session --------
-            if msg.topic == "new_client_session":
-                print()
-                client_sessions.append(None)
-                logger.info(
-                    "👤 Client changed -> %s",
-                    len(client_sessions),
-                )
-                continue
+                    # -------- Alerts --------
+                    if msg.topic in (
+                        "alerts",
+                        "purchases",
+                        "salesperson_changes",
+                    ):
+                        print()
+                        if msg.topic == "alerts":
+                            icon = "🚨"
+                        elif msg.topic == "purchases":
+                            icon = "💰"
+                        else:
+                            with worker_lock:
+                                global WORKER_NAME
+                                WORKER_NAME = event.get(
+                                    "new_salesperson",
+                                    WORKER_NAME,
+                                )
+                            icon = "👤"
 
-            # -------- Alerts --------
-            if msg.topic in ("alerts", "purchases", "salesperson_changes"):
-                if msg.topic == "alerts":
-                    icon = "🚨"
-                elif msg.topic == "purchases":
-                    icon = "💰"
-                else:
-                    with worker_lock:
-                        global WORKER_NAME
-                        # print("env", event)
-                        WORKER_NAME = event.get("new_salesperson", WORKER_NAME)
-                    icon = "👤"
-                    # client_sessions.append(None)
-                    # logger.info(
-                    #     "👤 Client changed -> %s",
-                    #     len(client_sessions),
-                    # )
-                    # остановить текущую микросессию,
-                    # чтобы main() сразу создал новую уже с новым WORKER_NAME
-                    stop_current_session()
+                            # остановить текущую микросессию,
+                            # чтобы main() создал новую
+                            stop_current_session()
 
-                logger.info(
-                    "%s store=%s %s | %.3f | %s",
-                    icon,
-                    event.get("store_id", "?"),
-                    event["session_id"],
-                    event.get("score", 0.0),
-                    event.get("text", ""),
-                )
-                continue
+                        print(f"{icon} store={event.get('store_id')} {event.get('session_id','')} {event.get('text', '')}")
+                        continue
 
-            # -------- ASR --------
-            if msg.topic == "asr_transcripts":
-                class_icon = ""
+                    # -------- ASR --------
+                    if msg.topic == "asr_transcripts":
+                        label = client_sessions[-1] if client_sessions else None
+                        class_icon = CLASS_ICONS.get(label, "❔") if label else ""
 
-                if client_sessions and client_sessions[-1] == "buy":
-                    class_icon = "🛍️"
-                elif client_sessions and client_sessions[-1] == "service":
-                    class_icon = "🛠️"
-                elif client_sessions and client_sessions[-1] == "return":
-                    class_icon = "📦"
+                        prefix = f"{class_icon} " if class_icon else ""
 
-                if event["is_final"]:
-                    print_live(
-                        f"{class_icon} 🏁 "
-                        f"{event['session_id']}: "
-                        f"{event['text']}"
-                    )
-                    print()
-                else:
-                    print_live(
-                        f"{class_icon} 🖨️ "
-                        f"{event['session_id']}: "
-                        f"{event['text']}"
-                    )
+                        if event["is_final"]:
+                            print_live(
+                                f"{prefix}🏁 {event['text']}"
+                            )
+                            print()
+                        else:
+                            print_live(
+                                f"{prefix}🖨️ {event['text']}"
+                            )
 
     finally:
+        logger.info("Stopping Kafka consumer...")
         await consumer.stop()
+        logger.info("Kafka consumer stopped")
 
 
 def start_kafka():
@@ -281,7 +292,7 @@ async def main():
 
     loop = asyncio.get_running_loop()
 
-    while True:
+    while not shutdown_event.is_set():
         session_id = make_session_id()
         stop_event = threading.Event()
         set_current_stop_event(stop_event)
@@ -294,10 +305,11 @@ async def main():
 
             for msg in stream:
                 if msg.is_begin:
-                    log_event("🟢 SPEECH START", msg.session_id)
+                    print("🟢 SPEECH START", msg.session_id)
 
                 if msg.is_end:
-                    log_event("🔴 SPEECH END  ", msg.session_id)
+                    print()
+                    print("🔴 SPEECH END  ", msg.session_id)
 
         except grpc.RpcError as e:
             logger.error("gRPC error: %s", e)
@@ -308,4 +320,7 @@ async def main():
 
 
 if __name__ == "__main__":
+
+    signal.signal(signal.SIGINT, handle_shutdown)
+    signal.signal(signal.SIGTERM, handle_shutdown)
     asyncio.run(main())
