@@ -328,10 +328,10 @@ def process_sheet(store_id: str, df: pd.DataFrame):
 
 
 
-def main():
+def create_final_report(input_file: str, output_file: str):
 
     sheets = pd.read_excel(
-        INPUT_FILE,
+        input_file,
         sheet_name=None,
     )
 
@@ -410,7 +410,7 @@ def main():
                 .dt.tz_localize(None)
             )
 
-        with pd.ExcelWriter(OUTPUT_FILE, engine="openpyxl") as writer:
+        with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
             out.to_excel(
                 writer,
                 index=False,
@@ -427,11 +427,19 @@ def main():
 
 
     print(
-        f"Wrote {OUTPUT_FILE}"
+        f"Wrote {output_file}"
     )
 
     print(
         f"Clients: {len(out)}"
+    )
+    return output_file
+
+
+def main():
+    create_final_report(
+        INPUT_FILE,
+        OUTPUT_FILE,
     )
 
 

@@ -1,12 +1,13 @@
 from datetime import date
 from pathlib import Path
-from zipfile import ZipFile, ZIP_DEFLATED
 import subprocess
 import sys
 import os
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
+
+from stats_service.create_final_report import create_final_report
 
 app = FastAPI()
 
@@ -55,19 +56,16 @@ def generate_report(report_date: date):
                 status_code=500,
                 detail=f"Report file not found: {path.name}",
             )
+        
+    final_xlsx_path = REPORT_DIR / f"final_{xlsx_path.name}"
 
-    zip_path = REPORT_DIR / f"{prefix}.zip"
-
-    with ZipFile(
-        zip_path,
-        "w",
-        compression=ZIP_DEFLATED,
-    ) as archive:
-        archive.write(xlsx_path, arcname=xlsx_path.name)
-        archive.write(pdf_path, arcname=pdf_path.name)
+    create_final_report(
+        str(xlsx_path),
+        str(final_xlsx_path),
+    )
 
     return FileResponse(
-        path=zip_path,
-        filename=zip_path.name,
+        path=final_xlsx_path,
+        filename=final_xlsx_path.name,
         media_type="application/zip",
     )
