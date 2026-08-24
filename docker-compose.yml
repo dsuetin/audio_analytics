@@ -52,7 +52,8 @@ services:
       # ADVERTISED ADDRESSES (самое важное место)
       - --advertise-kafka-addr
       # - INTERNAL://redpanda:9092,EXTERNAL://192.168.0.10:19092      
-      - INTERNAL://redpanda:9092,EXTERNAL://10.201.0.9:19092
+      # - INTERNAL://redpanda:9092,EXTERNAL://10.201.0.9:19092
+      - INTERNAL://redpanda:9092,EXTERNAL://172.16.20.111:19092
       # - INTERNAL://redpanda:9092,EXTERNAL://localhost:19092
 
 
@@ -214,10 +215,15 @@ services:
     networks:
       - speech
     environment:
-      - NVIDIA_VISIBLE_DEVICES=0 # GPU
-      # - ASR_USE_LM=True
-    runtime: nvidia
-    restart: unless-stopped
+      NVIDIA_VISIBLE_DEVICES: "0"
+      # ASR_USE_LM: "True"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
 
   vad:
     platform: linux/amd64
@@ -248,9 +254,14 @@ services:
         --backend-config=onnxruntime,inter_op_thread_count=1
         --backend-config=onnxruntime,execution_mode=1
         --backend-config=onnxruntime,enable-global-threadpool=1
-    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
 
-    restart: unless-stopped
 
   classification_service:
     image: audio_ingestion_starter-classification_service:latest
@@ -346,8 +357,16 @@ services:
       POSTGRES_DSN: postgresql://speech:speech@postgres:5432/speech_db
 
       PYTHONUNBUFFERED: 1
+      MAX_BOT_TOKEN: ${MAX_BOT_TOKEN}
+      MAX_CHAT_ID: ${MAX_CHAT_ID}
 
-    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
 
     restart: unless-stopped
 
