@@ -1,0 +1,8 @@
+asyncpg==0.31.0
+reportlab
+fastapi
+uvicorn
+requests
+pandas
+openpyxl
+snowballstemmer
