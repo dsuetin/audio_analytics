@@ -2,6 +2,30 @@ networks:
   speech:
     # external: true
 
+x-daily-stats: &daily-stats
+  build:
+    context: .
+    dockerfile: stats_service/Dockerfile
+
+  networks:
+    - speech
+
+  depends_on:
+    - postgres
+
+  volumes:
+    - ./reports:/reports
+    - ./stats_service:/app/stats_service
+
+  environment:
+    POSTGRES_HOST: postgres
+    POSTGRES_PORT: 5432
+    POSTGRES_USER: speech
+    POSTGRES_PASSWORD: speech
+    POSTGRES_DB: speech_db
+    REPORT_TIMEZONE: Europe/Moscow
+    REPORT_OUTPUT_DIR: /reports
+
 services:
 
   redpanda:
@@ -28,7 +52,8 @@ services:
       # ADVERTISED ADDRESSES (самое важное место)
       - --advertise-kafka-addr
       # - INTERNAL://redpanda:9092,EXTERNAL://192.168.0.10:19092      
-      - INTERNAL://redpanda:9092,EXTERNAL://10.201.0.9:19092
+      # - INTERNAL://redpanda:9092,EXTERNAL://10.201.0.9:19092
+      - INTERNAL://redpanda:9092,EXTERNAL://172.16.20.111:19092
       # - INTERNAL://redpanda:9092,EXTERNAL://localhost:19092
 
 
@@ -36,6 +61,7 @@ services:
       - "9092:9092"
       - "19092:19092"
       - "9644:9644"   # admin API (optional)
+    restart: unless-stopped
 
   minio:
 
@@ -55,12 +81,14 @@ services:
 
     volumes:
       - minio_data:/data
+    restart: unless-stopped
 
   worker:
     platform: linux/amd64
     volumes:
       - ./storage_worker:/app/storage_worker
       - ./proto:/app/proto
+    image: audio_ingestion_starter-worker:latest
     build:
       context: .
       dockerfile: storage_worker/Dockerfile
@@ -86,6 +114,7 @@ services:
 
     ports:
       - "50051:50051"
+    restart: unless-stopped
   
   console:
     image: docker.redpanda.com/redpandadata/console:latest
@@ -98,7 +127,9 @@ services:
       - redpanda
     networks:
       - speech
+    restart: unless-stopped
   vad-client:
+    image: audio_ingestion_starter-vad-client:latest
     build:
       context: .
       dockerfile: client/Dockerfile
@@ -117,8 +148,10 @@ services:
 
     ports:
       - "6000:6000"
+    restart: unless-stopped
 
   asr_worker:
+    image: audio_ingestion_starter-asr_worker:latest
     build:
       context: .
       dockerfile: asr_worker/Dockerfile
@@ -174,6 +207,7 @@ services:
       - "5050:80"
     depends_on:
       - postgres
+    restart: unless-stopped
 
   asr:
     image: asr:latest
@@ -184,7 +218,7 @@ services:
       - NVIDIA_VISIBLE_DEVICES=0 # GPU
       # - ASR_USE_LM=True
     runtime: nvidia
-
+    restart: unless-stopped
   vad:
     platform: linux/amd64
     image: vad_server:latest
@@ -215,9 +249,11 @@ services:
         --backend-config=onnxruntime,execution_mode=1
         --backend-config=onnxruntime,enable-global-threadpool=1
     runtime: nvidia
+    restart: unless-stopped
 
 
   classification_service:
+    image: audio_ingestion_starter-classification_service:latest
     build:
       context: .
       dockerfile: classification/Dockerfile
@@ -249,10 +285,38 @@ services:
 
     restart: unless-stopped
 
+  daily_stats_scheduler:
+    <<: *daily-stats
+    image: audio_ingestion_starter-daily_stats_service:latest
+    container_name: daily-stats-scheduler
+    command: ["python3", "-m", "stats_service.scheduler"]
+
+    restart: unless-stopped
+
+  daily_stats_api:
+    <<: *daily-stats
+    image: audio_ingestion_starter-daily_stats_service:latest
+    container_name: daily-stats-api
+    command:
+      - uvicorn
+      - stats_service.api:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    ports:
+      - "8000:8000"
+
+    restart: unless-stopped
+
+
   alert_service:
     build:
       context: .
       dockerfile: alert_service/Dockerfile
+
+    env_file:
+      - .env
 
     container_name: alert-service
 
