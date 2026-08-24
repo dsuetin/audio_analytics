@@ -215,10 +215,16 @@ services:
     networks:
       - speech
     environment:
-      - NVIDIA_VISIBLE_DEVICES=0 # GPU
-      # - ASR_USE_LM=True
-    runtime: nvidia
-    restart: unless-stopped
+      NVIDIA_VISIBLE_DEVICES: "0"
+      # ASR_USE_LM: "True"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
+
   vad:
     platform: linux/amd64
     image: vad_server:latest
@@ -248,8 +254,13 @@ services:
         --backend-config=onnxruntime,inter_op_thread_count=1
         --backend-config=onnxruntime,execution_mode=1
         --backend-config=onnxruntime,enable-global-threadpool=1
-    runtime: nvidia
-    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
 
 
   classification_service:
@@ -348,7 +359,13 @@ services:
       MAX_BOT_TOKEN: ${MAX_BOT_TOKEN}
       MAX_CHAT_ID: ${MAX_CHAT_ID}
 
-    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
 
     restart: unless-stopped
 
