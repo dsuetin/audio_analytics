@@ -88,7 +88,7 @@ services:
     volumes:
       - ./storage_worker:/app/storage_worker
       - ./proto:/app/proto
-    image: audio_ingestion_starter-worker:latest
+    image: audio_analytics-worker:latest
     build:
       context: .
       dockerfile: storage_worker/Dockerfile
@@ -129,7 +129,7 @@ services:
       - speech
     restart: unless-stopped
   vad-client:
-    image: audio_ingestion_starter-vad-client:latest
+    image: audio_analytics-vad-client:latest
     build:
       context: .
       dockerfile: client/Dockerfile
@@ -151,7 +151,7 @@ services:
     restart: unless-stopped
 
   asr_worker:
-    image: audio_ingestion_starter-asr_worker:latest
+    image: audio_analytics-asr_worker:latest
     build:
       context: .
       dockerfile: asr_worker/Dockerfile
@@ -264,7 +264,7 @@ services:
 
 
   classification_service:
-    image: audio_ingestion_starter-classification_service:latest
+    image: audio_analytics-classification_service:latest
     build:
       context: .
       dockerfile: classification/Dockerfile
@@ -298,7 +298,7 @@ services:
 
   daily_stats_scheduler:
     <<: *daily-stats
-    image: audio_ingestion_starter-daily_stats_service:latest
+    image: audio_analytics-daily_stats_service:latest
     container_name: daily-stats-scheduler
     command: ["python3", "-m", "stats_service.scheduler"]
 
@@ -306,7 +306,7 @@ services:
 
   daily_stats_api:
     <<: *daily-stats
-    image: audio_ingestion_starter-daily_stats_service:latest
+    image: audio_analytics-daily_stats_service:latest
     container_name: daily-stats-api
     command:
       - uvicorn
@@ -320,9 +320,9 @@ services:
 
     restart: unless-stopped
 
-
+  
   alert_service:
-    image: audio_ingestion_starter-alert_service:latest
+    image: audio_analytics-alert_service:latest
     build:
       context: .
       dockerfile: alert_service/Dockerfile
