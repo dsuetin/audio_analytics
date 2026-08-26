@@ -224,6 +224,7 @@ services:
             - driver: nvidia
               device_ids: ["0"]
               capabilities: [gpu]
+    restart: unless-stopped
 
   vad:
     platform: linux/amd64
@@ -262,7 +263,9 @@ services:
               device_ids: ["0"]
               capabilities: [gpu]
 
+    restart: unless-stopped
 
+    
   classification_service:
     image: audio_analytics-classification_service:latest
     build:
