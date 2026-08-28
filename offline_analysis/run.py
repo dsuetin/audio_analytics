@@ -22,11 +22,18 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+_STATS_DIR = Path(__file__).resolve().parents[1] / "stats_service"
+if str(_STATS_DIR) not in sys.path:
+    sys.path.insert(0, str(_STATS_DIR))
+
+from client_numbering import assign_display_client_ids
 
 from offline_analysis.llm import OllamaClient, OllamaError, extract_json
 from offline_analysis.prompt import SYSTEM_PROMPT, build_user_prompt, format_block_with_times
@@ -44,6 +51,10 @@ REPORT_COLUMNS = [
     "store_id",
     "seller_id",
     "client_id",
+    # "internal_client_id" is intentionally EXCLUDED from the user-facing report.
+    # It remains an internal/debug field kept on the row dicts (see build_final_rows /
+    # write_debug) and used by stats_service/client_numbering, but must NOT be exported
+    # to the final Excel (agreed 13-column schema).
     "recognition_text",
     "dialog_type",
     "is_sale",
@@ -243,14 +254,21 @@ def analyze_block(
 # ---------------------------------------------------------------------------
 
 def build_final_rows(all_results: list[dict], blocks: list[Block], confidence_min: float) -> tuple[list[dict], list[dict]]:
-    """Возвращает (rows_для_отчёта, отклонённые_блоки)."""
+    """Возвращает (rows_для_отчёта, отклонённые_блоки).
+
+    1 строка отчёта = 1 отдельный клиентский разговор (блок).
+    Каждый разговор получает уникальный ключ identity (internal client_id +
+    suffix при коллизии — realtime-счётчик сбрасывается при каждом рестарте
+    процесса, поэтому два разных разговора могут попасть под один ID).
+    display client_id — последовательный внутри магазина (assign_display_client_ids),
+    internal_client_id — технический ID.
+    """
     rows = []
     rejected = []
-    offline_counter = 0
+    store_seen: dict[str, dict[str, int]] = {}
+
     for r, block in zip(all_results, blocks):
-        # Этап: Все customer-блоки попадают в отчёт, независимо от confidence и миссии.
-        include = r["role"] == "customer" and not r.get("llm_error")
-        if not include:
+        if not (r["role"] == "customer" and not r.get("llm_error")):
             rejected.append(
                 {
                     "block_index": r["block_index"],
@@ -264,14 +282,13 @@ def build_final_rows(all_results: list[dict], blocks: list[Block], confidence_mi
             continue
 
         store = block.store_id
-        existing_client_id = block.client_id_hint
-        if existing_client_id:
-            client_id = existing_client_id
-        else:
-            # Никогда не было реального client_id в блоке — технический ID.
-            offline_counter += 1
-            short = re.sub(r"[^0-9A-Za-z_А-Яа-я]+", "", store)[:16]
-            client_id = f"offline_{short}_{offline_counter:02d}"
+        internal_client_id = block.client_id_hint
+        block_key = f"block_{r['block_index']:02d}"
+        base_key = internal_client_id if internal_client_id else f"offline_{store}_{block_key}"
+
+        seen = store_seen.setdefault(store, {})
+        seen[base_key] = seen.get(base_key, 0) + 1
+        identity_key = base_key if seen[base_key] == 1 else f"{base_key}#{seen[base_key]}"
 
         text = block.text
         session_ids = ", ".join(block.session_ids)
@@ -280,9 +297,6 @@ def build_final_rows(all_results: list[dict], blocks: list[Block], confidence_mi
         end = block.end
         duration = block.duration_sec
         dt = r.get("dialog_type")
-        # BUG-2 fix: у customer dialog_type обязателен. Если миссия не определена
-        # (unknown) — используем существующее business-соответствие из политики
-        # проекта: catch-all миссия "Прочее" -> "other" (classification/policy.py).
         if not dt or not str(dt).strip():
             dt = MISSION_TO_DIALOG_TYPE["Прочее"]
 
@@ -290,8 +304,8 @@ def build_final_rows(all_results: list[dict], blocks: list[Block], confidence_mi
             {
                 "store_id": store,
                 "seller_id": block.seller_id,
-                "client_id": client_id,
-                "existing_client_id": existing_client_id,
+                "client_id": identity_key,
+                "internal_client_id": internal_client_id,
                 "recognition_text": text,
                 "dialog_type": dt,
                 "is_sale": bool(r["is_sale"]),
@@ -302,11 +316,12 @@ def build_final_rows(all_results: list[dict], blocks: list[Block], confidence_mi
                 "dialog_duration_sec": round(duration, 3),
                 "session_ids": session_ids,
                 "model_reasoning": r.get("reason") if isinstance(r.get("reason"), str) and r.get("reason", "").strip() else None,
-                "block_id": f"block_{r['block_index']:02d}",
+                "block_id": block_key,
             }
         )
 
-    rows.sort(key=lambda x: (x["store_id"], x["dialog_start_at"]))
+    rows = assign_display_client_ids(rows)
+    rows.sort(key=lambda x: (x["store_id"], x.get("dialog_start_at") or datetime.min))
     return rows, rejected
 
 

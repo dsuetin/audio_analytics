@@ -16,6 +16,10 @@ x-daily-stats: &daily-stats
   volumes:
     - ./reports:/reports
     - ./stats_service:/app/stats_service
+    # Offline analysis (offline_analysis/run.py) is chained into the daily pipeline by
+    # stats_service.scheduler, which resolves repo_root=/app. Mount the package so the
+    # analyzer can be imported/executed from inside the scheduler container.
+    - ./offline_analysis:/app/offline_analysis
 
   environment:
     POSTGRES_HOST: postgres
@@ -25,6 +29,17 @@ x-daily-stats: &daily-stats
     POSTGRES_DB: speech_db
     REPORT_TIMEZONE: Europe/Moscow
     REPORT_OUTPUT_DIR: /reports
+    # Offline analysis (Qwen via Ollama). From inside the `speech` network the host
+    # loopback is not reachable, so default OLLAMA_HOST to the bridge gateway (where
+    # Ollama listens on the host). All values are overridable via the environment.
+    OLLAMA_HOST: ${OLLAMA_HOST:-http://172.18.0.1:11434}
+    OFFLINE_LLM_MODEL: ${OFFLINE_LLM_MODEL:-qwen3.8:27b}
+    # Chain the offline step after the raw report (set to 0 to keep raw-only behavior).
+    OFFLINE_ANALYSIS_ENABLED: ${OFFLINE_ANALYSIS_ENABLED:-1}
+    # Sequential (no LLM parallelism) so a single nightly block never exceeds the timeout;
+    # generous per-request timeout because Qwen3.8:27B is slow on long blocks.
+    OFFLINE_WORKERS: ${OFFLINE_WORKERS:-1}
+    OFFLINE_LLM_TIMEOUT: ${OFFLINE_LLM_TIMEOUT:-3600}
 
 services:
 

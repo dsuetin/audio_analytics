@@ -1,5 +1,19 @@
+import sys
+from pathlib import Path
+
 import pandas as pd
 import snowballstemmer
+
+_THIS_DIR = str(Path(__file__).resolve().parent)
+_REPO_ROOT = str(Path(__file__).resolve().parents[1])
+for _p in (_THIS_DIR, _REPO_ROOT):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+try:
+    from stats_service.client_numbering import assign_display_client_ids
+except ImportError:
+    from client_numbering import assign_display_client_ids
 
 stemmer = snowballstemmer.stemmer("russian")
 
@@ -520,7 +534,10 @@ def create_final_report(input_file: str, output_file: str):
 
 
     out = pd.DataFrame(
-        all_rows
+        assign_display_client_ids(
+            all_rows,
+            identity=lambda row: id(row),
+        )
     )
 
 
@@ -531,6 +548,8 @@ def create_final_report(input_file: str, output_file: str):
         "seller_id",
 
         "client_id",
+
+        "internal_client_id",
 
         "recognition_text",
 

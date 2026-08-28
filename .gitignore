@@ -32,3 +32,4 @@ redpanda_data/
 *.xlsx
 *.pdf
 *.zip
+*.json
