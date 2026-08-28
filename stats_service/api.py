@@ -1,16 +1,9 @@
 from datetime import date
-from logging import getLogger
 from pathlib import Path
-import subprocess
-import sys
 import os
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
-
-from stats_service.create_final_report import create_final_report
-
-logger = getLogger(__name__)
 
 app = FastAPI(title="Stats Service")
 
@@ -154,7 +147,7 @@ INDEX_HTML = """<!doctype html>
 
       <button type="submit" id="submit-btn">
         <span class="spinner" id="spinner" hidden></span>
-        <span id="btn-label">Сформировать отчёт</span>
+        <span id="btn-label">Скачать отчёт</span>
       </button>
 
       <div class="alert" id="alert" role="alert"></div>
@@ -181,7 +174,7 @@ INDEX_HTML = """<!doctype html>
     pending = loading;
     button.disabled = loading;
     spinner.hidden = !loading;
-    label.textContent = loading ? "Формирование отчёта..." : "Сформировать отчёт";
+    label.textContent = loading ? "Загрузка отчёта..." : "Скачать отчёт";
   }
 
   function showError(message) {
@@ -210,7 +203,16 @@ INDEX_HTML = """<!doctype html>
       );
 
       if (!response.ok) {
-        throw new Error("report generation failed");
+        var detail = "report generation failed";
+        try {
+          var errBody = await response.json();
+          if (errBody && errBody.detail) {
+            detail = errBody.detail;
+          }
+        } catch (e) {
+          // тело не JSON — используем сообщение по умолчанию
+        }
+        throw new Error(detail);
       }
 
       var contentDisposition = response.headers.get("Content-Disposition") || "";
@@ -233,7 +235,7 @@ INDEX_HTML = """<!doctype html>
       link.remove();
       URL.revokeObjectURL(url);
     } catch (error) {
-      showError("Не удалось сформировать отчёт. Попробуйте ещё раз.");
+      showError("Не удалось загрузить отчёт. Попробуйте ещё раз.");
     } finally {
       setLoading(false);
     }
@@ -250,19 +252,6 @@ def index_page():
     return INDEX_HTML
 
 
-def _report_generation_error(report_date: date, context: str, context_detail: str = "") -> None:
-    logger.error(
-        "Report generation failed for date=%s: %s %s",
-        report_date.isoformat(),
-        context,
-        context_detail,
-    )
-    raise HTTPException(
-        status_code=500,
-        detail="Не удалось сформировать отчёт. Попробуйте ещё раз.",
-    )
-
-
 @app.get("/reports/daily")
 def generate_report(report_date: date):
 
@@ -271,63 +260,18 @@ def generate_report(report_date: date):
         exist_ok=True,
     )
 
-    result = subprocess.run(
-        [
-            sys.executable,
-            "stats_service/scheduler.py",
-            "--once",
-            "--date",
-            report_date.isoformat(),
-        ],
-        capture_output=True,
-        text=True,
-    )
+    report_date_str = report_date.isoformat()
 
-    if result.returncode != 0:
-        _report_generation_error(
-            report_date,
-            "scheduler exited with non-zero code",
-            f"stderr={result.stderr!r} stdout={result.stdout!r}",
-        )
+    final_path = REPORT_DIR / f"final_transcript_report_{report_date_str}.xlsx"
 
-    prefix = f"transcript_report_{report_date.isoformat()}"
-
-    xlsx_path = REPORT_DIR / f"{prefix}.xlsx"
-    pdf_path = REPORT_DIR / f"{prefix}.pdf"
-
-    for path in (xlsx_path, pdf_path):
-        if not path.exists():
-            _report_generation_error(
-                report_date,
-                "report file not found",
-                path.name,
-            )
-
-    final_xlsx_path = REPORT_DIR / f"final_{xlsx_path.name}"
-
-    try:
-        create_final_report(
-            str(xlsx_path),
-            str(final_xlsx_path),
-        )
-    except HTTPException:
-        raise
-    except Exception:
-        _report_generation_error(
-            report_date,
-            "final report assembly failed",
-            str(sys.exc_info()[1]),
-        )
-
-    if not final_xlsx_path.exists():
-        _report_generation_error(
-            report_date,
-            "final report file not found",
-            final_xlsx_path.name,
+    if not final_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Отчёт за дату {report_date_str} не существует",
         )
 
     return FileResponse(
-        path=final_xlsx_path,
-        filename=final_xlsx_path.name,
+        path=final_path,
+        filename=final_path.name,
         media_type="application/zip",
     )
