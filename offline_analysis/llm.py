@@ -27,8 +27,11 @@ class OllamaClient:
         temperature: float = 0.0,
         num_ctx: int = 64000,
         num_predict: int = 8192,
+        think: bool = False,
     ) -> dict:
-        # Модель в thinking-режиме: num_predict должен покрывать и «размышление», и JSON.
+        # think=False обязательно: thinking-модель «съедает» num_predict на
+        # размышление и в content может не остаться JSON. Для детерминированного
+        # JSON-контракта (сегментация/классификация) рассуждения отключаем.
         payload = {
             "model": self.model,
             "stream": False,
@@ -36,6 +39,7 @@ class OllamaClient:
                 "temperature": temperature,
                 "num_ctx": num_ctx,
                 "num_predict": num_predict,
+                "think": bool(think),
             },
             "messages": [
                 {"role": "system", "content": system},
@@ -61,7 +65,8 @@ class OllamaClient:
 
 
 def extract_json(text: str) -> dict:
-    """Достаёт первый JSON-объект из ответа модели (допускает markdown/noise)."""
+    """Достаёт первый JSON-объект из ответа модели (допускает markdown, noise и
+    обрывы по num_predict)."""
     text = (text or "").strip()
     candidates = [text]
     if "```" in text:
@@ -81,4 +86,24 @@ def extract_json(text: str) -> dict:
                     return obj
             except json.JSONDecodeError:
                 continue
+
+    # Fallback: обрыв по num_predict. Находим начало объекта и пытаемся закрыть
+    # «висящие» элементы массива/объекта, чтобы получить частичный, но полезный ответ.
+    for cand in candidates:
+        start = cand.find('{')
+        if start == -1:
+            continue
+        frag = cand[start:]
+        open_obj = frag.count('{') - frag.count('}')
+        open_arr = frag.count('[') - frag.count(']')
+        if open_obj < 0 or open_arr < 0:
+            continue
+        closed = frag.rstrip().rstrip(',"')
+        closed = closed + ']' * max(open_arr, 0) + '}' * max(open_obj, 0)
+        try:
+            obj = json.loads(closed)
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            continue
     return {}

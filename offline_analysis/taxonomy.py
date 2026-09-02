@@ -41,4 +41,11 @@ LOSS_REASONS = [
 
 ROLES = {"customer", "employee", "background", "unknown"}
 
+# Типы сегментов дня (offline segmentation).
+SEGMENT_TYPES = ("dialog", "employee", "background", "unknown")
+# dialog     = потенциальный клиентский разговор;
+# employee   = разговор сотрудников между собой;
+# background = фоновая/шумовая/посторонняя речь;
+# unknown    = LLM не уверена.
+
 CONFIDENCE_MIN = 0.6  # минимальная уверенность LLM для попадания в финальный отчёт

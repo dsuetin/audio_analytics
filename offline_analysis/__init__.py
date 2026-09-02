@@ -6,6 +6,7 @@ from .taxonomy import (
     MISSIONS,
     MISSION_TO_DIALOG_TYPE,
     ROLES,
+    SEGMENT_TYPES,
 )
 
 __all__ = [
@@ -14,4 +15,5 @@ __all__ = [
     "MISSIONS",
     "MISSION_TO_DIALOG_TYPE",
     "ROLES",
+    "SEGMENT_TYPES",
 ]
