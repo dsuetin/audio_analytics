@@ -1,128 +1,127 @@
-# Audio ingestion starter
+# Audio Analytics
 
-This repository is the first step of the production pipeline:
+Система аудиоаналитики для магазинов: слушает разговоры через
+микрофон, распознаёт речь, классифицирует диалоги, фиксирует
+покупки, возражения и смену продавцов — и формирует ежедневные
+отчёты (Excel/PDF + LLM-анализ).
 
-Mic/VAD client -> gRPC ingestion worker -> S3 multipart upload -> Kafka event log
+## Архитектура (кратко)
 
-## What is included
-
-- `proto/audio.proto` — streaming contract
-- `proto/bridge.proto` — internal VAD bridge contract
-- `storage_worker/` — gRPC service that writes audio to S3 using multipart upload
-- `storage_worker/kafka_events.py` — Kafka event publisher for upload lifecycle events
-- `client/example_client.py` — example sender for raw PCM chunks
-- `docker-compose.yml` — local infrastructure for MinIO + Kafka + the worker
-
-## Proto split
-
-There are two separate protobuf contracts:
-
-- `audio.proto` is the storage contract. It is what the worker understands and what ends up in S3.
-- `bridge.proto` is the VAD-facing contract. It receives microphone chunks, runs VAD, and converts them into the storage contract.
-
-They must stay separate because the VAD bridge is intentionally a different boundary from storage. If both files share the same package and message names, Python protobuf generation can clash.
-
-## Important design choice
-
-Kafka is used only for events:
-- `session_started`
-- `part_uploaded`
-- `session_completed`
-- `session_failed`
-
-Kafka does **not** carry raw audio.
-
-## Run order
-
-1. Start infrastructure with Docker Compose
-2. Build and run the worker
-3. Connect your VAD client to the gRPC endpoint
-4. When `BEGIN` happens, start a new `session_id`
-5. Stream only the chunks that belong to speech
-6. Send `is_end=true` on session end
-
-## S3 layout
-
-The worker uploads one object per session using multipart upload:
-
-`audio/<session_id>.raw`
-
-This avoids the object explosion problem that happens when each chunk is stored as a separate S3 object.
-
-## Next step after this starter
-
-Split the ingestion service into:
-- a gRPC gateway
-- a separate storage worker
-
-For now, this starter keeps the storage worker as the main executable, so you can begin wiring the client immediately.
-
-
-python -m grpc_tools.protoc \
-  -I=proto \
-  --python_out=generated \
-  --grpc_python_out=generated \
-  proto/audio.proto
-
-
-CREATE TABLE transcripts (
-    session_id TEXT PRIMARY KEY,
-    store_id TEXT,
-    client_id TEXT,
-    seller_id TEXT,
-    recognition_text TEXT,
-    dialog_type TEXT,
-    is_sale BOOLEAN NOT NULL DEFAULT FALSE,
-    is_alarm_triggered BOOLEAN NOT NULL DEFAULT FALSE,
-    is_final BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-## Daily Excel report
-
-The script `scripts/export_daily_transcript_report.py` exports one day of rows from `transcripts` into a readable `.xlsx` workbook and a matching `.pdf` report.
-
-It creates these sheets:
-
-- `Overview` with totals and report metadata
-- `Records` sorted for store/seller review
-- `Clients` sorted for client review
-- `Store summary`
-- `Seller summary`
-- `Client summary`
-
-Run it with either `POSTGRES_DSN` or the usual `POSTGRES_*` variables:
-
-```bash
-python3 scripts/export_daily_transcript_report.py --date 2026-07-12
+```
+Микрофон (Windows-клиент)
+  → gRPC VAD gateway (online_vad / Triton)
+  → storage worker (gRPC :50051 → MinIO: audio/<session>/NNNNNN.wav)
+  → Kafka topic audio_events
+  → asr_worker (Triton EMformer → текст)
+  → Kafka asr_transcripts + PostgreSQL (transcripts)
+  → classification_service (dialog_type) + alert_service
+    (покупка / возражение / смена продавца → Telegram)
+  → daily stats: Excel/PDF отчёты + Ollama (qwen3.8:27b)
 ```
 
-By default it exports the previous day in `Europe/Moscow` and writes `transcript_report_<date>.xlsx` and `transcript_report_<date>.pdf`.
+Диаграммы (flow + sequence) и детальный разбор — в
+`docs/architecture.md`.
 
-If you run PostgreSQL locally, set `POSTGRES_HOST=localhost`. If you run the script inside Docker, keep `POSTGRES_HOST=postgres`.
+## Сервисы
 
-## Nightly stats service
+| Сервис | Код | Роль |
+|---|---|---|
+| `worker` | `storage_worker/` | gRPC-инжест аудио → WAV → MinIO, события `audio_events` |
+| `vad-client` | `client/client_vad_service.py` | gRPC-гейтвей `AudioBridge` + VAD (Triton `online_vad`) |
+| `asr_worker` | `asr_worker/` | S3 → Triton EMformer → `asr_transcripts` + Postgres |
+| `classification_service` | `classification/` | классификация диалога (`classified_events`) |
+| `alert_service` | `alert_service/` | покупка/возражение/смена продавца, Telegram |
+| `daily_stats_scheduler` | `stats_service/scheduler.py` | ежедневный raw-отчёт + LLM-анализ |
+| `daily_stats_api` | `stats_service/api.py` | HTTP-API выдачи final-отчётов (`:8000`) |
+| (вне compose) | `windows_autorun/client.py` | клиент на ПК магазина: микрофон + лог/GUI |
+| (вне compose) | `offline_analysis/` | LLM-анализ дневного Excel (Ollama) |
 
-The `stats_service/` container runs the same daily export automatically at `00:00` and saves the files into `/reports`.
+Инфраструктура (Docker): Redpanda (Kafka), MinIO (S3), PostgreSQL 16,
+pgAdmin, Redpanda Console, два Triton с GPU (`asr`, `vad`).
 
-Default behavior:
+Подробно по каждому — в `docs/services.md`.
 
-- `REPORT_TIMEZONE=Europe/Moscow`
-- `REPORT_OUTPUT_DIR=reports` locally
-- `REPORT_OUTPUT_DIR=/reports` in Docker
-- `POSTGRES_HOST=postgres`
+## Быстрый запуск
 
-You can start it with Docker Compose together with the rest of the stack.
+Требования: Docker + Compose v2, NVIDIA GPU + NVIDIA Container Toolkit
+(два Triton'а), готовых образы `asr:latest` и `vad_server:latest`
+собираются **внешне**, не в этом репозитории, Ollama (опционально,
+для LLM-шага отчёта).
 
-To run it on demand and exit immediately, pass `--once`. You can also force a specific date with `--date YYYY-MM-DD`.
+```bash
+# 0) секреты — рядом с docker-compose.yml:
+#    .env  →  TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
+#    (значения по умолчанию в .env — заменить на свои, не коммитить токены)
 
-If you run it locally and your shell has `POSTGRES_HOST=postgres` from Docker, pass `--postgres-host localhost` explicitly.
+docker compose up -d --build
+docker compose ps          # все Up
+```
 
+До первого запуска нужно один раз:
 
-SELECT * 
-FROM transcripts 
-ORDER BY created_at DESC 
-LIMIT 30;
+1. Создать бакет MinIO `audio-sessions` (кодом не создаётся).
+2. Создать таблицу `transcripts` (DDL — в `docs/database.md`;
+   миграций в репозитории нет).
 
-DELETE FROM transcripts
-WHERE created_at::date = CURRENT_DATE;
+Полная инструкция с проверками — в `docs/deployment.md`.
+
+## Проверка работоспособности
+
+```bash
+docker compose ps
+docker compose logs --tail 50 worker asr_worker classification-service alert-service
+curl -s http://localhost:8000/docs                                   # stats API
+curl -s http://localhost:8001/v2/health/ready                        # Triton VAD
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:9000/minio/health/live
+docker compose exec postgres pg_isready -h postgres -U speech
+```
+
+MinIO Console: `http://localhost:9001`, Redpanda Console:
+`http://localhost:8080`, pgAdmin: `http://localhost:5050`.
+
+Smoke-тест end-to-end без живого микрофона (WAV-файл):
+`docs/deployment.md` → «Smoke test».
+
+## Где что найти
+
+| Документ | Содержимое |
+|---|---|
+| `docs/architecture.md` | архитектура, диаграммы (Mermaid), сеть/порты |
+| `docs/services.md` | описание каждого сервиса |
+| `docs/data-flow.md` | переход «кто → кому → по какому каналу → что» |
+| `docs/kafka.md` | Redpanda, все topics, consumer groups |
+| `docs/database.md` | таблица `transcripts`, кто пишет/читает |
+| `docs/storage-s3.md` | MinIO, bucket, ключи объектов |
+| `docs/ml-pipeline.md` | VAD + ASR, модели, параметры Triton |
+| `docs/api.md` | gRPC-контракты, HTTP API, Telegram |
+| `docs/deployment.md` | запуск, конфигурация, smoke-тест |
+| `docs/troubleshooting.md` | диагностика по сценариям |
+| `docs/USER_GUIDE.md` | памятка для продавцов |
+
+## Troubleshooting
+
+`docs/troubleshooting.md` — разборы: контейнер не стартует,
+Kafka/Postgres/MinIO/Triton недоступны, текст не попадает в БД,
+алерт не срабатывает, смена продавца не работает, отчёт не
+генерируется, PC-клиент молчит.
+
+Быстрый «светофор» — там же, раздел 13.
+
+## Ключевые env-переменные
+
+| Переменная | Для чего | Где |
+|---|---|---|
+| `TELEGRAM_TOKEN`, `TELEGRAM_CHAT_ID` | **обязательны** для `alert_service` | `.env` (корень) |
+| `SERVER_IP`, `STORE_ID`, `WORKER_NAME`, `AUDIO_DEVICE` | PC-клиент магазина | `windows_autorun/.env` |
+| `OLLAMA_HOST`, `OFFLINE_LLM_MODEL`, `OFFLINE_ANALYSIS_ENABLED` | LLM-шаг дневного отчёта | `.env` (корень), default в compose |
+| `REPORT_TIMEZONE`, `REPORT_OUTPUT_DIR` | отчёты | compose (default Europe/Moscow, `./reports`) |
+
+Полный список с дефолтами — `docs/deployment.md` раздел 3.
+
+## Логи
+
+- Сервисы: `docker compose logs -f <service>`.
+- PC-клиент: `windows_autorun/logs/client.log` +
+  `logs/client_heartbeat` (watchdog).
+- Отчётные файлы: `./reports/` (`transcript_report_<date>.xlsx/pdf`,
+  `final_transcript_report_<date>.xlsx`, `*_debug.json`).

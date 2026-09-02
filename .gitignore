@@ -33,3 +33,4 @@ redpanda_data/
 *.pdf
 *.zip
 *.json
+*.txt

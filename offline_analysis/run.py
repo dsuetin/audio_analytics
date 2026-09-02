@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import time
@@ -57,6 +58,40 @@ from offline_analysis.taxonomy import (
     ROLES,
     SEGMENT_TYPES,
 )
+
+
+# --- Бюджет LLM, согласованный с regression-прогоном ---------------------------
+# Модель qwen3.8:27b — thinking-модель: чтобы она и рассуждала, и выдала JSON
+# сегментации за один запрос, нужен большой num_predict и num_ctx. Это именно тот
+# бюджет, которым был пересчитан исторический файл (regression_new): без него
+# segmentation дегенерирует в построчный fallback (тысячи unknown-сегментов) и
+# ночной отчёт теряет большинство диалогов. Переменные окружения позволяют
+# переопределить бюджет (не меняя код).
+PIPELINE_NUM_CTX = int(os.getenv("OFFLINE_NUM_CTX", "131072"))
+PIPELINE_NUM_PREDICT = int(os.getenv("OFFLINE_NUM_PREDICT", "128000"))
+
+
+class BigBudgetLLM:
+    """Обёртка над OllamaClient: гарантирует минимальный бюджет контекста/выхода.
+
+    Реализует тот же интерфейс (chat_json), что ожидает segmentation и
+    classification. НЕ меняет prompt'ы, таксономию и логику segmentation — только
+    поднимает num_ctx / num_predict до уровня, которым был сделан regression-прогон
+    исторических файлов (реализация BigBudgetLLM там идентична по смыслу).
+    """
+
+    def __init__(self, model: str | None = None, min_ctx: int = PIPELINE_NUM_CTX,
+                 min_predict: int = PIPELINE_NUM_PREDICT):
+        self._c = OllamaClient(model=model)
+        self.model = self._c.model
+        self.host = self._c.host
+        self._min_ctx = min_ctx
+        self._min_predict = min_predict
+
+    def chat_json(self, system: str, user: str, **kwargs) -> dict:
+        kwargs["num_ctx"] = max(int(kwargs.get("num_ctx", 0)), self._min_ctx)
+        kwargs["num_predict"] = max(int(kwargs.get("num_predict", 0)), self._min_predict)
+        return self._c.chat_json(system, user, **kwargs)
 
 
 REPORT_COLUMNS = [
@@ -478,17 +513,29 @@ def run(args) -> int:
     output_file = args.output or input_file_path_to_final(input_file)
     debug_path = args.debug or str(Path(output_file).with_name(Path(output_file).stem + "_debug.json"))
 
-    print(f"OFFLINE анализ: {input_file}")
+    # 1) SEGMENTATION (без client_id)
+    client = BigBudgetLLM(model=args.model)
+
+    # --- Явный баннер пайплайна: чтобы нельзя было спутать новый и старый offline ---
+    # (требование: в nightly-логе должно быть видно, какой именно pipeline запущен).
+    print("OFFLINE ANALYSIS")
+    print(f"pipeline     : segmented (LLM segmentation -> LLM classification)")
+    print(f"model        : {client.model}")
+    print(f"host         : {client.host}")
+    print(f"num_ctx      : {PIPELINE_NUM_CTX}")
+    print(f"num_predict  : {PIPELINE_NUM_PREDICT}")
+    print(f"workers      : {args.workers}")
+    print(f"retries      : {args.retries}")
+    print(f"confidence_min: {args.confidence_min}")
+    print(f"input        : {input_file}")
+    print(f"output       : {output_file}")
+
     sheets = load_raw(input_file)
     total_rows = sum(len(df) for _, df in sheets)
     store_rows = []
     for store_id, df in sheets:
         store_rows.append((store_id, df_to_rows(df)))
     print(f"ASR-записей: {total_rows} (магазинов: {len(store_rows)})")
-
-    # 1) SEGMENTATION (без client_id)
-    client = OllamaClient(model=args.model)
-    print(f"LLM: {client.model} @ {client.host}")
 
     all_segments: list[Segment] = []
     all_results: dict[int, dict] = {}
@@ -560,7 +607,7 @@ def main() -> int:
     parser.add_argument(
         "--target-chunk-tokens",
         type=int,
-        default=32000,
+        default=36000,
         help="максимальный объём chunks в токенах (технический лимит для контекста LLM)",
     )
     # legacy-параметры, УДАЛЕНЫ как жёсткие правила (требование №5).
