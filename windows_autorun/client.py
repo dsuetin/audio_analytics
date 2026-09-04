@@ -911,122 +911,151 @@ def set_session_label(label):
 
 def mic_stream(session_id, stop_event):
     blocksize = int(SAMPLE_RATE * CHUNK_MS / 1000)
-    logger.info("Microphone session started: %s", session_id)
-
-    first_chunk = True
-    logged_missing = False
 
     while not stop_event.is_set() and not shutdown_event.is_set():
         device = get_audio_device()
 
+        # Микрофона нет — продолжаем искать его.
         if device is None:
-            if not logged_missing:
-                logger.warning(
-                    "Microphone is unavailable. Waiting for device to appear..."
-                )
-                status_writer.update(mic_connected=False, mic_device="")
-                log_available_input_devices()
-                logged_missing = True
-            else:
-                logger.debug("Microphone still unavailable; retrying...")
-            # Waiting for the microphone is a *normal* state, not a hang:
-            # keep the application clock advancing so the watchdog does not
-            # restart a healthy client that is simply waiting for audio.
+            status_writer.update(
+                mic_connected=False,
+                mic_device="",
+            )
             app_clock.touch()
-            stop_event.wait(AUDIO_RECONNECT_DELAY)
+
+            time.sleep(AUDIO_RECONNECT_DELAY)
             continue
 
-        logged_missing = False
-
         try:
-            device_name = sd.query_devices(device).get("name", "?")
-        except Exception:
-            device_name = "?"
-        status_writer.update(mic_connected=True, mic_device=device_name)
-        logger.info("Opening microphone #%d: %s", device, device_name)
-        logger.info("Using microphone device for session %s", device)
+            device_info = sd.query_devices(device)
+            device_name = device_info.get("name", str(device))
 
-        audio_queue = queue.Queue(maxsize=50)
-        audio_state = {"last_callback": time.monotonic()}
-        callback = make_audio_callback(audio_queue, audio_state)
-        session_monitor.set_queue(audio_queue)
-        stream = None
-
-        try:
-            stream = sd.InputStream(
-                samplerate=SAMPLE_RATE,
-                channels=1,
-                dtype="int16",
-                blocksize=blocksize,
-                device=device,
-                callback=callback,
+            logger.info(
+                "Opening microphone: device=%s name=%s",
+                device,
+                device_name,
             )
-            stream.start()
-            logger.info("Microphone stream started")
 
-            while not stop_event.is_set() and not shutdown_event.is_set():
-                # --- watchdog: callbacks must keep arriving ---
-                age = time.monotonic() - audio_state["last_callback"]
-                if age > AUDIO_CALLBACK_TIMEOUT:
-                    logger.error(
-                        "Audio watchdog: no callback for %.1fs; assuming device lost",
-                        age,
-                    )
-                    break
+            status_writer.update(
+                mic_connected=True,
+                mic_device=device_name,
+            )
 
-                try:
-                    if not stream.active:
-                        logger.warning("Audio stream is no longer active")
-                        break
-                except Exception as exc:
-                    logger.warning("Audio stream check failed: %s", exc)
-                    break
+            audio_queue = queue.Queue(maxsize=50)
 
-                try:
-                    audio = audio_queue.get(timeout=0.2)
-                except Empty:
-                    continue
-                except Exception as exc:
-                    logger.warning("Failed reading audio chunk: %s", exc)
-                    break
+            audio_state = {
+                "last_callback": time.monotonic(),
+            }
 
-                yield bridge_pb2.MicChunk(
-                    session_id=session_id,
-                    audio=audio.tobytes(),
-                    sample_rate=SAMPLE_RATE,
-                    is_begin=first_chunk,
-                    is_end=False,
+            callback = make_audio_callback(audio_queue, audio_state)
+
+            session_monitor.set_queue(audio_queue)
+
+            stream = None
+            first_chunk = True
+
+            try:
+                stream = sd.InputStream(
+                    samplerate=SAMPLE_RATE,
+                    channels=1,
+                    dtype="int16",
+                    blocksize=blocksize,
+                    device=device,
+                    callback=callback,
                 )
-                first_chunk = False
 
-        except Exception as exc:
-            logger.error("Microphone stream error: %s", exc)
-        finally:
-            if stream is not None:
-                try:
-                    stream.stop()
-                except Exception:
-                    pass
-                try:
-                    stream.close()
-                except Exception:
-                    pass
-            session_monitor.clear()
-            # Only report mic as disconnected if it actually failed,
-            # not when gRPC stopped us (stop_event set by main loop).
-            if not stop_event.is_set():
-                status_writer.update(mic_connected=False, mic_device=device_name)
-            logger.info("Microphone stream closed")
+                stream.start()
+
+                logger.info(
+                    "Microphone stream started: device=%s name=%s",
+                    device,
+                    device_name,
+                )
+
+                while not stop_event.is_set() and not shutdown_event.is_set():
+
+                    # Если callback перестал приходить —
+                    # считаем устройство потерянным.
+                    callback_age = (
+                        time.monotonic() - audio_state["last_callback"]
+                    )
+
+                    if callback_age > AUDIO_CALLBACK_TIMEOUT:
+                        logger.warning(
+                            "Microphone callback stopped for %.1fs; "
+                            "reconnecting microphone",
+                            callback_age,
+                        )
+                        break
+
+                    # PortAudio сам сообщил, что stream больше не активен.
+                    if not stream.active:
+                        logger.warning(
+                            "Microphone stream became inactive; "
+                            "reconnecting microphone"
+                        )
+                        break
+
+                    try:
+                        audio = audio_queue.get(timeout=0.2)
+                    except queue.Empty:
+                        continue
+
+                    if audio is None:
+                        continue
+
+                    yield bridge_pb2.MicChunk(
+                        session_id=session_id,
+                        audio=audio.tobytes(),
+                        sample_rate=SAMPLE_RATE,
+                        is_begin=first_chunk,
+                        is_end=False,
+                    )
+
+                    first_chunk = False
+
+            finally:
+                # КРИТИЧНО:
+                # при потере DJI обязательно полностью закрываем
+                # старый PortAudio stream.
+                if stream is not None:
+                    try:
+                        stream.stop()
+                    except Exception:
+                        pass
+
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
+
+                session_monitor.clear_queue()
+
+                if not stop_event.is_set() and not shutdown_event.is_set():
+                    status_writer.update(
+                        mic_connected=False,
+                        mic_device="",
+                    )
+
+                logger.info(
+                    "Microphone stream closed; will search for device again"
+                )
+
+        except Exception:
+            # Любая ошибка открытия/работы устройства не должна
+            # убить клиент. Возвращаемся в цикл поиска.
+            logger.exception(
+                "Microphone stream error; will reconnect"
+            )
+
+            status_writer.update(
+                mic_connected=False,
+                mic_device="",
+            )
 
         if not stop_event.is_set() and not shutdown_event.is_set():
-            logger.warning(
-                "Microphone disconnected; retrying in %.1fs...",
-                AUDIO_RECONNECT_DELAY,
-            )
-            stop_event.wait(AUDIO_RECONNECT_DELAY)
-
-    logger.info("Microphone session stopped: %s", session_id)
-
+            app_clock.touch()
+            time.sleep(AUDIO_RECONNECT_DELAY)
 
 # ============================================================
 # EVENT HELPERS
