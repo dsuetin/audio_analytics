@@ -100,40 +100,40 @@ def test_same_internal_id_is_consistently_mapped():
 # Offline-анализ: run.build_final_rows даёт display-номера и сохраняет internal
 # ---------------------------------------------------------------------------
 
-def _make_block(store_id, internal_client_id, start_time):
+def _make_rows(store_id, old_client_id, start_time, n=2):
     from datetime import timedelta
-    from offline_analysis.segmentation import Row, Block
+    from offline_analysis.segmentation import Row
+    rows = []
+    for k in range(n):
+        rows.append(
+            Row(
+                created_at=start_time + timedelta(seconds=5 * k),
+                text="здравствуйте, что ищете" if k == 0 else "хочу посмотреть",
+                seller_id="ivan",
+                client_id=old_client_id if k == n - 1 else None,  # старый ID — только для debug
+                dialog_type=None,
+                is_sale=False,
+                is_alarm_triggered=False,
+                session_id=f"{store_id}-s{k}",
+                index=k,
+            )
+        )
+    return rows
 
-    base = start_time
-    rows = [
-        Row(
-            created_at=base,
-            text="здравствуйте, что ищете",
-            seller_id="ivan",
-            client_id=None,
-            dialog_type=None,
-            is_sale=False,
-            is_alarm_triggered=False,
-            session_id="s1",
-            index=0,
-        ),
-        Row(
-            created_at=base + timedelta(seconds=5),
-            text="хочу посмотреть, потом до свидания",
-            seller_id="ivan",
-            client_id=internal_client_id,
-            dialog_type="buy",
-            is_sale=True,
-            is_alarm_triggered=False,
-            session_id="s2",
-            index=1,
-        ),
-    ]
-    return Block(
+
+def _make_segment(store_id, seg_no, old_client_id, start_time, n=2, seg_type="dialog"):
+    """Строит новый Segment (после segmentation) — 2 реплики, старым client_id не опирается."""
+    from offline_analysis.segmentation import Segment
+    rows = _make_rows(store_id, old_client_id, start_time, n)
+    return Segment(
+        segment_id=f"segment_{seg_no:03d}",
         store_id=store_id,
-        seller_id="ivan",
+        start_index=0,
+        end_index=n - 1,
+        segment_type=seg_type,
+        confidence=0.9,
+        reason="test segment",
         rows=rows,
-        client_id_hint=internal_client_id,
     )
 
 
@@ -142,18 +142,21 @@ def test_offline_build_final_rows_numbering_per_store():
     from offline_analysis.run import build_final_rows
 
     base = datetime(2026, 8, 27, 10, 0, 0)
-    blocks = [
-        _make_block("storeA", "client_17", base),
-        _make_block("storeA", "client_19", base + timedelta(hours=1)),
-        _make_block("storeB", "client_5", base + timedelta(minutes=5)),
-        _make_block("storeB", "client_5", base + timedelta(hours=2)),
-        # блок без client_id -> offline-technical ID (не должно ломать нумерацию)
-        _make_block("storeC", None, base + timedelta(minutes=10)),
+    # Разные реальные разговоры = разные сегменты. Старый client_id НЕ участвует в нумерации.
+    segments = [
+        _make_segment("storeA", 1, "client_17", base),
+        _make_segment("storeA", 2, "client_19", base + timedelta(hours=1)),
+        # storeB: один старым ID «сбросились» два разных разговора -> всё равно разные display-номера
+        _make_segment("storeB", 3, "client_5", base + timedelta(minutes=5)),
+        _make_segment("storeB", 4, "client_5", base + timedelta(hours=2)),
+        # storeC: вообще без старого client_id
+        _make_segment("storeC", 5, None, base + timedelta(minutes=10)),
     ]
 
-    results = [
-        {
-            "block_index": i,
+    # results — dict по индексу сегмента (после segmentation)
+    results = {
+        i: {
+            "segment_index": i,
             "role": "customer",
             "mission": "Купить",
             "is_sale": True,
@@ -163,32 +166,20 @@ def test_offline_build_final_rows_numbering_per_store():
             "dialog_type": "buy",
             "raw": None,
         }
-        for i in range(len(blocks))
-    ]
-    # технический ID для блока без client_id — как в run.py
-    blocks[4].client_id_hint = None
+        for i in range(len(segments))
+    }
 
-    rows, _rejected = build_final_rows(results, blocks, confidence_min=0.5)
+    rows, _rejected = build_final_rows(segments, results, confidence_min=0.5)
 
     per_store = {}
     for r in rows:
-        per_store.setdefault(r["store_id"], []).append(
-            (r["client_id"], r.get("internal_client_id"))
-        )
+        per_store.setdefault(r["store_id"], []).append(r["client_id"])
 
-    assert per_store["storeA"] == [
-        ("client_1", "client_17"),
-        ("client_2", "client_19"),
-    ]
-    # storeB: одиница ID (restarter) у двух разных разговоров ->
-    # разные display-номера, не сливаются в один client_1
-    assert per_store["storeB"] == [
-        ("client_1", "client_5"),
-        ("client_2", "client_5"),
-    ]
-    # storeC: offline-технический ID остался technical, display = client_1
-    assert per_store["storeC"][0][0] == "client_1"
-    assert per_store["storeC"][0][1].startswith("offline_")
+    assert per_store["storeA"] == ["client_1", "client_2"]
+    # storeB: два разных реальных разговора -> два разных display-номера
+    assert per_store["storeB"] == ["client_1", "client_2"]
+    # storeC: без старого client_id тоже получает display-номер
+    assert per_store["storeC"] == ["client_1"]
 
 
 def test_input_rows_are_not_mutated():
@@ -272,25 +263,33 @@ def test_non_final_greeting_does_not_create_new_client():
 
 
 # ---------------------------------------------------------------------------
-# 6. Реплики до появления client_id остаются внутри одного блока клиента
+# 6. Реплики до первого клиента (preamble) НЕ объединяются автоматически
+#    в клиентский блок; новое сегментирование закрывает ВСЕ строки.
 # ---------------------------------------------------------------------------
 
-def test_preamble_rows_merge_into_first_client_block():
+def test_preamble_not_merged_into_first_client_and_all_rows_covered():
+    """Старое поведение (preamble → блоки первого клиента) удалено:
+    сегментация опирается на текст, а не client_id, и все строки дня
+    покрываются сегментами (union == [0..N-1])."""
     from datetime import datetime, timedelta
-    from offline_analysis.segmentation import Row, build_blocks
+    from offline_analysis.segmentation import Row, segment_rows
 
     base = datetime(2026, 8, 27, 10, 0, 0)
     rows = [
         Row(base, "рассматриваю товар", "ivan", None, None, False, False, "s1", 0),
-        Row(base + timedelta(seconds=5), "здравствуйте", "ivan", None, None, False, False, "s2", 1),
+        Row(base + timedelta(seconds=5), "что-то говорит коллега", "ivan", None, None, False, False, "s2", 1),
         Row(base + timedelta(seconds=10), "сколько стоит", "ivan", "client_15", "buy", False, False, "s3", 2),
         Row(base + timedelta(seconds=15), "хорошо", "ivan", "client_15", "buy", True, False, "s4", 3),
-        Row(base + timedelta(seconds=20), "до свидания", "ivan", "client_15", "buy", True, False, "s5", 4),
     ]
-    blocks = build_blocks(rows, "storeA")
-    assert len(blocks) == 1
-    assert blocks[0].client_id_hint == "client_15"
-    assert len(blocks[0].rows) == 5
+
+    # Без LLM — детерминированный fallback: каждая строка свой сегмент, всё покрыто.
+    segments = segment_rows(rows, llm=None, store_id="storeA", fallback_type="unknown")
+    assert len(segments) == len(rows)
+
+    covered = [i for seg in segments for i in range(seg.start_index, seg.end_index + 1)]
+    assert covered == list(range(len(rows)))
+    # клиент_id из исходника НЕ влияет на segmentation (все типы unknown в fallback)
+    assert all(seg.segment_type == "unknown" for seg in segments)
 
 
 # ---------------------------------------------------------------------------
