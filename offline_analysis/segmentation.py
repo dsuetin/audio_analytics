@@ -490,6 +490,302 @@ def _format_rows_for_prompt(rows: list[Row]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Длительность-порог и Re-split длинных dialog-сегментов
+# ---------------------------------------------------------------------------
+
+# Данные (2026-08-25..2026-09-01, NEW pipeline):
+#   p50=5.0m  p75=11.1m  p90=18.2m  p95=22.8m  p99=37.8m  max=58.7m
+# => 30 min  ≈ p95 * 1.3 : «подозрительно длинный», требует проверки
+# => 60 min  ≈ p99 * 1.6: «практически наверняка несколько клиентов»
+# Пороги НЕ жёсткие: мы НЕ режем после N минут механически. LLM решает по смыслу
+# (завершение разговора, новое приветствие, завершённая покупка + новый клиент),
+# и МОЖЕТ вернуть segments:[] для действительно одного длинного разговора.
+REVIEW_LONG_SEC = 30 * 60
+VERY_LONG_SEC = 60 * 60
+# Лимит повторных обращений к LLM на один сегмент (защита от зацикливания).
+MAX_RESEGMENT_ATTEMPTS = 3
+
+
+def _parse_resegment_response(
+    content: str,
+    segment: "Segment",
+    fallback_type: str = "dialog",
+) -> list[dict] | None:
+    """Разбирает ответ LLM re-segmentation.
+
+    Контракт возврата:
+      * ``[]``              — «оставить как есть» (LLM не нашёл внутренних границ);
+      * ``[seg, ...]``      — список из 2+ локальных сегментов, покрывающих РОВНО
+                              ``[0..L-1]`` без пересечений/пропусков;
+      * ``None``            — некорректный ответ (невозможно применить),
+                              нужно повторить запрос.
+    """
+    from .llm import extract_json
+    obj = extract_json(content or "")
+    if not isinstance(obj, dict) or obj.get("segments") is None:
+        return None
+    raw = obj["segments"]
+    if not isinstance(raw, list):
+        return None
+    L = segment.end_index - segment.start_index + 1  # локальная длина
+    if L <= 0:
+        return None
+    if len(raw) == 0:
+        return []  # явный «оставить как есть»
+    if len(raw) == 1:
+        # одиночный segment покрывающий весь блок => «оставить как есть»;
+        # если не покрывает — невалиден (невозможно применить).
+        item = raw[0]
+        if not isinstance(item, dict):
+            return None
+        try:
+            s = int(item.get("start_row"))
+            e = int(item.get("end_row"))
+        except (TypeError, ValueError):
+            return None
+        # допустим +/-2 строки по краям (LLM может сбить на 1-2 реплики)
+        if (segment.start_index - 2 <= s <= segment.start_index + 2 and
+                segment.end_index - 2 <= e <= segment.end_index + 2):
+            return []
+        return None
+    # N >= 2 сегмента: нормализуем границы, проверяем покрытие [seg.start..seg.end]
+    local_raw: list[dict] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            return None
+        try:
+            s = int(item.get("start_row"))
+            e = int(item.get("end_row"))
+        except (TypeError, ValueError):
+            return None
+        if e < s:
+            return None
+        # сегменты обязаны лежать ВНУТРИ исходного блока
+        if e < segment.start_index or s > segment.end_index:
+            return None
+        s = max(s, segment.start_index)
+        e = min(e, segment.end_index)
+        stype = _clean_segment_type(item.get("type")) or fallback_type
+        if stype in ("background", "unknown"):
+            # внутри клиентского длительного фрагмента background/unknown
+            # почти всегда = разговор клиента/сотрудников. Переименовываем,
+            # чтобы classification-этап не ушёл в «отказ».
+            stype = "dialog"
+        local_raw.append({
+            "start_row": s - segment.start_index,
+            "end_row": e - segment.start_index,
+            "type": stype,
+            "confidence": _clean_confidence(item.get("confidence"), 0.5),
+            "reason": item.get("reason") if isinstance(item.get("reason"), str) else None,
+        })
+    repaired = repair_segments(local_raw, total_rows=L, fallback_type=fallback_type)
+    # обязательный инвариант: coverage [0..L-1] без дублей и пропусков
+    covered = sorted(i for r in repaired for i in range(r["start_row"], r["end_row"] + 1))
+    if covered != list(range(L)):
+        return None
+    # repair_segments уже гарантирует порядок; дополнительная проверка:
+    prev = -1
+    for r in repaired:
+        if r["start_row"] != prev + 1:
+            return None
+        prev = r["end_row"]
+    if prev != L - 1:
+        return None
+    # если все N сегментов случайно сошлись в ОДИН [0..L-1] — это «оставить как есть»
+    if len(repaired) == 1 and repaired[0]["start_row"] == 0 and repaired[0]["end_row"] == L - 1:
+        return []
+    return repaired
+
+
+def resplit_long_segments(
+    segments: list[Segment],
+    rows: list[Row],
+    llm: "LLM | None",
+    store_id: str = "",
+    thresholds: tuple[int, int] = (REVIEW_LONG_SEC, VERY_LONG_SEC),
+    verbose: bool = True,
+) -> tuple[list[Segment], list[dict]]:
+    """Прогоняет каждый «подозрительно длинный» dialog-сегмент через LLM-re-split.
+
+    Возвращает ``(new_segments, metrics)``:
+      * ``new_segments`` — новый список сегментов (покрытие [0..N-1], без
+        дублей/пропусков — инвариант сохраняется всегда).
+      * ``metrics``      — статистика: какие сегменты были проверены, сколько
+        LLM-вызовов, сколько получилось разбито.
+
+    Если ``llm is None`` — сегменты не меняются (fallback для test/offline).
+    """
+    if llm is None or not segments:
+        return segments, {"candidates": 0, "resegmented": 0, "llm_calls": 0,
+                          "split_from": [], "kept_single": []}
+
+    from .prompt import RESEGMENT_LONG_SYSTEM_PROMPT, build_long_dialog_resegment_prompt
+
+    review_min, very_min = thresholds
+    new_segments: list[Segment] = []
+    candidates = 0
+    resegmented = 0
+    llm_calls = 0
+    split_from: list[dict] = []
+    kept_single: list[dict] = []
+
+    # Идём по сегментам в исходном порядке. Каждый «подозрительно длинный»
+    # dialog-сегмент пытаемся разбить через LLM:
+    #   []      -> оставить как есть (один непрерывный разговор);
+    #   [seg..] -> разбить на N>=2 (несколько независимых клиентов);
+    #   None    -> LLM не дал корректный ответ -> оставить как есть.
+    for seg in segments:
+        if seg.segment_type != "dialog":
+            new_segments.append(seg)
+            continue
+        dur = seg.duration_sec
+        if dur < review_min:
+            # не «подозрительно длинный» — пропускаем
+            new_segments.append(seg)
+            continue
+        candidates += 1
+        is_very_long = dur >= very_min
+        seg_rows = rows[seg.start_index: seg.end_index + 1]
+
+        # 3-состоятельный результат LLM-проверки:
+        #   []      -> «оставить как есть» (один разговор)
+        #   [seg..] -> разбить на N>=2
+        #   None    -> невалидный ответ, пробуем ещё
+        keep: bool | None = None
+        split_parts: list[dict] | None = None
+        last_err: Exception | None = None
+        for _attempt in range(MAX_RESEGMENT_ATTEMPTS):
+            user = build_long_dialog_resegment_prompt(store_id, seg_rows, is_very_long=is_very_long)
+            # PRODUCTION-LIKE budget (matching segmentation primary call):
+            # thinking-модель qwen3.8:27b требует num_ctx/num_predict с запасом,
+            # иначе ответ не помещается в контекст и JSON не возвращается.
+            # Окружение позволяет переопределить (OFFLINE_NUM_CTX / OFFLINE_NUM_PREDICT).
+            import os as _os
+            num_ctx = int(_os.getenv("OFFLINE_NUM_CTX", "131072"))
+            num_predict = int(_os.getenv("OFFLINE_NUM_PREDICT", "128000"))
+            try:
+                resp = llm.chat_json(RESEGMENT_LONG_SYSTEM_PROMPT, user,
+                                     num_ctx=num_ctx, num_predict=num_predict)
+                content = resp.get("content", "") if isinstance(resp, dict) else ""
+            except TypeError:
+                # старый fake-клиент без kwargs — перепроверяем без именованных параметров
+                resp = llm.chat_json(RESEGMENT_LONG_SYSTEM_PROMPT, user)
+                content = resp.get("content", "") if isinstance(resp, dict) else ""
+            except Exception as exc:  # noqa: BLE001 — логируем, пробуем ещё
+                last_err = exc
+                continue
+            llm_calls += 1
+            parsed = _parse_resegment_response(content, seg, fallback_type="dialog")
+            if parsed is None:
+                last_err = ValueError("invalid response / cannot cover segment [0..L-1]")
+                if verbose:
+                    print(f"[re-split] {seg.segment_id}: retry ({last_err})")
+                continue
+            if parsed == []:
+                keep = True
+            else:
+                split_parts = parsed
+            break
+
+        if split_parts:
+            # Разбили на N>=2. Строим новые Segment-объекты (global indices) и заменяем.
+            resegmented += 1
+            for i, r in enumerate(split_parts):
+                local_start = r["start_row"]
+                local_end = r["end_row"]
+                new_segments.append(Segment(
+                    segment_id=f"{seg.segment_id}r{i + 1}",
+                    store_id=store_id,
+                    start_index=seg.start_index + local_start,
+                    end_index=seg.start_index + local_end,
+                    segment_type=r.get("type", "dialog"),
+                    confidence=r.get("confidence", 0.4),
+                    reason=r.get("reason"),
+                    rows=[rows[seg.start_index + local_start + k]
+                          for k in range(local_end - local_start + 1)],
+                ))
+            split_from.append({
+                "segment_id": seg.segment_id,
+                "start_index": seg.start_index,
+                "end_index": seg.end_index,
+                "duration_sec": round(dur, 1),
+                "subsegments": len(split_parts),
+            })
+            if verbose:
+                print(f"[re-split] {seg.segment_id} ({dur/60:.1f} min) -> {len(split_parts)} сегментов; "
+                      f"было: {(seg.reason or '')[:50]}...")
+        else:
+            # «оставить как есть» либо LLM не смог дать корректный ответ
+            new_segments.append(seg)
+            kept_single.append({
+                "segment_id": seg.segment_id,
+                "start_index": seg.start_index,
+                "end_index": seg.end_index,
+                "duration_sec": round(dur, 1),
+                "last_error": str(last_err) if last_err else None,
+            })
+            if verbose and keep is None:
+                print(f"[re-split] {seg.segment_id} ({dur/60:.1f} min): оставлен "
+                      f"(LLM: {last_err})")
+
+    metrics = {
+        "candidates": candidates,
+        "resegmented": resegmented,
+        "llm_calls": llm_calls,
+        "split_from": split_from,
+        "kept_single": kept_single,
+        "thresholds": {"review_sec": review_min, "very_long_sec": very_min},
+    }
+
+    # Финальный инвариант: покрытие [0..N-1] (как в segment_rows)
+    prev = -1
+    for s in new_segments:
+        assert s.start_index == prev + 1, (prev, s)
+        prev = s.end_index
+    if rows:
+        assert prev == len(rows) - 1, (prev, len(rows))
+    return new_segments, metrics
+
+
+# ---------------------------------------------------------------------------
+# Duration-metrics (диагностика качества сегментации)
+# ---------------------------------------------------------------------------
+
+def duration_metrics(segments: list[Segment]) -> dict:
+    """Диагностические метрики длительности dialog-сегментов.
+
+    Включает min, max, median, p90, p95 и количество >30min/>60min/>90min/>120min.
+    Используется в отчёте (debug JSON + print_stats) для контроля.
+    """
+    import statistics
+    durs = [s.duration_sec for s in segments if s.segment_type == "dialog"]
+    if not durs:
+        return {
+            "count": 0, "min_sec": None, "max_sec": None,
+            "median_sec": None, "p90_sec": None, "p95_sec": None,
+            "gt_30min": 0, "gt_60min": 0, "gt_90min": 0, "gt_120min": 0,
+        }
+    durs_sorted = sorted(durs)
+    n = len(durs_sorted)
+    def _q(q):
+        # p90, p95 — nearest-rank
+        k = max(1, int(round(q / 100.0 * n)))
+        return durs_sorted[k - 1]
+    return {
+        "count": n,
+        "min_sec": round(durs_sorted[0], 1),
+        "max_sec": round(durs_sorted[-1], 1),
+        "median_sec": round(statistics.median(durs), 1),
+        "p90_sec": round(_q(90), 1),
+        "p95_sec": round(_q(95), 1),
+        "gt_30min": sum(1 for x in durs if x > 30 * 60),
+        "gt_60min": sum(1 for x in durs if x > 60 * 60),
+        "gt_90min": sum(1 for x in durs if x > 90 * 60),
+        "gt_120min": sum(1 for x in durs if x > 120 * 60),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Основная LLM-сегментация
 # ---------------------------------------------------------------------------
 
@@ -498,13 +794,15 @@ def _segmentation_system_prompt(store_id: str | None) -> str:
     return SEGMENTATION_SYSTEM_PROMPT
 
 
-def _segmentation_user_prompt(store_id: str, rows: list[Row], chunk_index: int, chunk_count: int) -> str:
+def _segmentation_user_prompt(store_id: str, rows: list[Row], chunk_index: int, chunk_count: int,
+                              sales_snippet: str | None = None) -> str:
     from .prompt import build_segmentation_user_prompt
     return build_segmentation_user_prompt(
         store_id=store_id,
         rows=rows,
         chunk_index=chunk_index,
         chunk_count=chunk_count,
+        sales_snippet=sales_snippet,
     )
 
 
@@ -515,12 +813,13 @@ def _segment_one_chunk(
     chunk_index: int,
     chunk_count: int,
     fallback_type: str = "unknown",
+    sales_snippet: str | None = None,
 ) -> list[dict]:
     """Сегментирует один чанк через LLM и возвращает «сырые» сегменты
     (индексы — глобальные, т.к. Row.index уже глобальный)."""
 
     system = _segmentation_system_prompt(store_id)
-    user = _segmentation_user_prompt(store_id, rows, chunk_index, chunk_count)
+    user = _segmentation_user_prompt(store_id, rows, chunk_index, chunk_count, sales_snippet)
     # Сегментация шумного дня генерирует МНОГО сегментов (коротких), поэтому
     # выходной бюджет берём с запасом. num_ctx чуть больше входа, чтобы хватило
     # на prompt + answer. kwargs передаём осторожно: старые fake-клиенты могут
@@ -542,6 +841,10 @@ def segment_rows(
     fallback_type: str = "unknown",
     verbose: bool = True,
     retries: int = 2,
+    resplit_long: bool = True,
+    resplit_thresholds: tuple[int, int] = (REVIEW_LONG_SEC, VERY_LONG_SEC),
+    metrics_sink: dict | None = None,
+    sales_snippet: str | None = None,
 ) -> list[Segment]:
     """Сегментирует поток строк дня.
 
@@ -550,6 +853,11 @@ def segment_rows(
     поведение по умолчанию для unit-тестов и для отладки без Ollama.
 
     ``llm`` реализует Protocol ``LLM`` (метод ``chat_json``).
+
+    ``resplit_long`` (default=True) — выполняет дополнительный LLM-проход
+    над «подозрительно длинными» dialog-сегментами (``resplit_thresholds``)
+    для обнаружения нескольких последовательных клиентских взаимодействий
+    внутри одного блока. Отключается в юнит-тестах и при llm=None.
     """
     if not rows:
         return []
@@ -575,7 +883,10 @@ def segment_rows(
             last_err: Exception | None = None
             for attempt in range(retries + 1):
                 try:
-                    candidate = _segment_one_chunk(llm, chunk_rows, store_id, idx + 1, len(chunks), fallback_type)
+                    candidate = _segment_one_chunk(
+                        llm, chunk_rows, store_id, idx + 1, len(chunks), fallback_type,
+                        sales_snippet=sales_snippet,
+                    )
                     if candidate:
                         chunk_raw = candidate
                         break
@@ -622,6 +933,36 @@ def segment_rows(
         prev = seg.end_index
     assert prev == total - 1
 
+    # Дополнительный прогон над «подозрительно длинными» dialog-сегментами:
+    # ищем несколько последовательных клиентских взаимодействий внутри
+    # одного блока (завершение + новое появление/новая покупка).
+    # Если LLM вернёт корректный набор N>=2 тилей — заменяем сегмент,
+    # иначе оставляем как есть. В любом случае инвариант покрытия сохраняется
+    # (re-split использует только валидные tile-совокупности).
+    if resplit_long and llm is not None and any(
+        s.segment_type == "dialog" and s.duration_sec >= resplit_thresholds[0]
+        for s in segments
+    ):
+        segments, resplit_metrics = resplit_long_segments(
+            segments, rows, llm,
+            store_id=store_id,
+            thresholds=resplit_thresholds,
+            verbose=verbose,
+        )
+        if metrics_sink is not None:
+            # Акумулируем метрики (по несколько магазинов):
+            #   int/float -> сумма; list -> extend; dict -> update/merge.
+            for k, v in resplit_metrics.items():
+                if isinstance(v, (int, float)):
+                    metrics_sink[k] = metrics_sink.get(k, 0) + v
+                elif isinstance(v, list):
+                    existing = metrics_sink.get(k) or []
+                    existing.extend(v)
+                    metrics_sink[k] = existing
+                elif isinstance(v, dict):
+                    existing = metrics_sink.get(k) or {}
+                    existing.update(v)
+                    metrics_sink[k] = existing
     return segments
 
 

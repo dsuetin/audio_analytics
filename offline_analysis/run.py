@@ -37,6 +37,7 @@ if str(_STATS_DIR) not in sys.path:
 from client_numbering import assign_display_client_ids
 
 from offline_analysis.llm import OllamaClient, OllamaError, extract_json
+from offline_analysis.pdf_report import generate_pdf_report
 from offline_analysis.prompt import (
     SYSTEM_PROMPT,
     build_classification_user_prompt,
@@ -45,11 +46,14 @@ from offline_analysis.prompt import (
 from offline_analysis.segmentation import (
     Segment,
     df_to_rows,
+    duration_metrics,
     load_raw,
     log_size,
     measure_rows,
     segment_rows,
 )
+# EXPERIMENT: sales ground-truth (off by default; enabled via --sales-ground-truth)
+from offline_analysis import sales_gt as _sales
 from offline_analysis.taxonomy import (
     CONFIDENCE_MIN,
     LOSS_REASONS,
@@ -191,14 +195,40 @@ def normalize_llm_result(raw: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# EXPERIMENT: sales ground-truth helpers (no-op if sales_gt is None)
+# ---------------------------------------------------------------------------
+
+def _sales_for_store(sales_gt, store_id: str | None) -> list:
+    """Все real-sale записи для конкретного store_id (упорядоченные по времени)."""
+    if not sales_gt:
+        return []
+    recs = [r for r in sales_gt if r.store_id == store_id and r.is_purchase]
+    recs.sort(key=lambda r: r.sale_time)
+    return recs
+
+
+def _sales_snippet_for_store(sales_gt, store_id: str | None) -> str | None:
+    if not sales_gt:
+        return None
+    recs = _sales_for_store(sales_gt, store_id)
+    if not recs:
+        return None
+    return _sales.make_sales_snippet(recs, store_id or "")
+
+
+# ---------------------------------------------------------------------------
 # Классификация одного dialog-сегмента (ПОСЛЕ segmentation)
 # ---------------------------------------------------------------------------
 
-def _attempt_one_classification(client, segment: Segment, block_text: str | None) -> dict:
+def _attempt_one_classification(
+    client, segment: Segment, block_text: str | None,
+    sales_snippet: str | None = None,
+) -> dict:
     prompt = build_classification_user_prompt(
         store_id=segment.store_id,
         seller_id=segment.seller_id,
         segment_text_with_times=block_text if block_text is not None else format_segment_with_times(segment),
+        sales_snippet=sales_snippet,
     )
     out = client.chat_json(SYSTEM_PROMPT, prompt)
     parsed = extract_json(out["content"])
@@ -213,13 +243,14 @@ def classify_segment(
     index: int,
     retries: int = 2,
     verbose: bool = True,
+    sales_snippet: str | None = None,
 ) -> dict:
     """Классифицирует ОДИН выделенный dialog-сегмент."""
     last_error = None
     for attempt in range(retries + 1):
         try:
             text = format_segment_with_times(segment)
-            parsed = _attempt_one_classification(client, segment, text)
+            parsed = _attempt_one_classification(client, segment, text, sales_snippet)
             parsed["segment_index"] = index
             if verbose:
                 print(
@@ -360,6 +391,7 @@ def write_debug(
     total_input_rows: int,
     day_size: dict,
     debug_path: str,
+    extra: dict | None = None,
 ) -> None:
     """Расширенный debug: покрывает ВСЕ сегменты дня (dialog/employee/background/unknown)."""
     items = []
@@ -403,6 +435,8 @@ def write_debug(
             "covered_rows": len(covered),
             "total_rows": total_input_rows,
         },
+        "dialog_duration_metrics": duration_metrics(segments),
+        "re_long_split": (extra or {}).get("re_long_split"),
         "segments": items,
         "rejected_details": rejected,
     }
@@ -505,16 +539,182 @@ def show_first_segments(segments: list[Segment], all_results: dict[int, dict], n
 
 
 # ---------------------------------------------------------------------------
-# main
+# EXPERIMENT: sales ground-truth — сопоставление и post-LLM enforcement
+# (включается ТОЛЬКО при args.sales_ground_truth; без флага ничего не меняется)
 # ---------------------------------------------------------------------------
 
+def _customer_index_map(segments: list[Segment], all_results: dict) -> dict:
+    """Воспроизводит нумерацию display client_id из build_final_rows / assign_display_client_ids:
+
+    возвращает ``{(store_id, client_id): segment_index}`` для customer-сегментов,
+    в порядке перечисления сегментов (то, что попадает в финальный отчёт).
+    """
+    per_store: dict[str, int] = {}
+    out: dict[tuple[str, str], int] = {}
+    for idx, seg in enumerate(segments):
+        r = all_results.get(idx)
+        if r is None or r.get("llm_error") or r.get("role") != "customer":
+            continue
+        store = seg.store_id
+        n = per_store.get(store, 0) + 1
+        per_store[store] = n
+        out[(store, f"client_{n}")] = idx
+    return out
+
+
+def enforce_ground_truth(
+    segments: list[Segment],
+    all_results: dict[int, dict],
+    final_rows: list[dict],
+    sales_gt: list,
+    candidate_window_sec: int,
+    verbose: bool = True,
+) -> list[dict]:
+    """Post-LLM контроль (EXPERIMENT): привязывает реальные продажи к dialog.
+
+    * Продажа, попавшая в окно диалога (buy/is_sale) и не покрытая другой продажей
+      -> этот диалог принудительно mission=«Купить», is_sale=true, dialog_type=buy.
+    * Продажа, у которой есть candidate-диалог, но он НЕ buy, и это ближайший
+      sales-кандидат -> принудительно buy (исправление WRONG_TYPE).
+
+    Не меняет диалоги, которым уже соответствует другая (ближе) продажа.
+    Возвращает список log-записей применённых коррекций.
+    """
+    if not sales_gt:
+        return []
+    results = _sales.match_sales_to_dialogs(
+        sales_gt, final_rows,
+        candidate_window_sec=candidate_window_sec,
+    )
+    cust_idx = _customer_index_map(segments, all_results)
+
+    # Какие продажи уже «закрывают» каждый диалог (по MATCHED/AMBIGUOUS)
+    covered_by: dict[tuple[str, str], list[int]] = {}
+    for res in results:
+        if res.matched_dialog is None:
+            continue
+        if res.status in ("MATCHED", "AMBIGUOUS"):
+            covered_by.setdefault((res.store_id, res.matched_dialog), []).append(res.sale.id)
+
+    corrections: list[dict] = []
+    # 1) Принудительно buy для диалогов, куда привязана продажа (MATCHED/AMBIGUOUS)
+    for res in results:
+        if res.matched_dialog is None:
+            continue
+        if res.status not in ("MATCHED", "AMBIGUOUS"):
+            continue
+        key = (res.store_id, res.matched_dialog)
+        seg_idx = cust_idx.get(key)
+        if seg_idx is None:
+            continue
+        row = [r for r in final_rows
+               if r.get("store_id") == res.store_id and r.get("client_id") == res.matched_dialog]
+        if not row:
+            continue
+        already = row[0].get("dialog_type") == "buy" and bool(row[0].get("is_sale"))
+        if not already:
+            all_results[seg_idx]["mission"] = "Купить"
+            all_results[seg_idx]["is_sale"] = True
+            all_results[seg_idx]["dialog_type"] = "buy"
+            all_results[seg_idx]["loss_reason"] = None
+            if all_results[seg_idx].get("confidence", 0.0) < 0.8:
+                all_results[seg_idx]["confidence"] = 0.8
+            row[0]["dialog_type"] = "buy"
+            row[0]["is_sale"] = True
+            row[0]["loss_reason"] = None
+            all_results[seg_idx]["enforced_by_ground_truth"] = [res.sale.id]
+            corrections.append({
+                "action": "ENFORCE_BUY",
+                "store_id": res.store_id,
+                "client_id": res.matched_dialog,
+                "segment_index": seg_idx,
+                "sale_ids": covered_by.get(key, [res.sale.id]),
+            })
+            if verbose:
+                print(
+                    f"[SALES-GT] ENFORCE_BUY {res.store_id}/{res.matched_dialog} "
+                    f"sale={res.sale.sale_time:%H:%M:%S} ({res.sale.id}) "
+                    f"(was {row[0].get('dialog_type')}/{row[0].get('is_sale')})"
+                )
+    # 2) WRONG_TYPE: кандидат есть, но он не buy — если диалог NEAR и sales-кандидат,
+    #    и не покрыт другой продажей -> принудительно buy.
+    for res in results:
+        if res.status != "WRONG_TYPE":
+            continue
+        if res.matched_dialog is None:
+            continue
+        key = (res.store_id, res.matched_dialog)
+        # не трогаем диалог, который уже закрывает другую (ближе) продажу
+        if key in covered_by:
+            continue
+        seg_idx = cust_idx.get(key)
+        if seg_idx is None:
+            continue
+        row = [r for r in final_rows
+               if r.get("store_id") == res.store_id and r.get("client_id") == res.matched_dialog]
+        if not row:
+            continue
+        all_results[seg_idx]["mission"] = "Купить"
+        all_results[seg_idx]["is_sale"] = True
+        all_results[seg_idx]["dialog_type"] = "buy"
+        all_results[seg_idx]["loss_reason"] = None
+        if all_results[seg_idx].get("confidence", 0.0) < 0.8:
+            all_results[seg_idx]["confidence"] = 0.8
+        row[0]["dialog_type"] = "buy"
+        row[0]["is_sale"] = True
+        row[0]["loss_reason"] = None
+        all_results[seg_idx]["enforced_by_ground_truth"] = [res.sale.id]
+        corrections.append({
+            "action": "ENFORCE_BUY_WRONGTYPE",
+            "store_id": res.store_id,
+            "client_id": res.matched_dialog,
+            "segment_index": seg_idx,
+            "sale_ids": [res.sale.id],
+            "sale_time": res.sale.sale_time.isoformat(),
+            "dialog_type_before": row[0].get("dialog_type"),
+        })
+        if verbose:
+            print(
+                f"[SALES-GT] ENFORCE_BUY_WRONGTYPE {res.store_id}/{res.matched_dialog} "
+                f"sale={res.sale.sale_time:%H:%M:%S} (was {row[0].get('dialog_type')})"
+            )
+    return corrections
+
+
 def run(args) -> int:
+    """Выполняет offline-конвейер и создаёт отчёты (Excel + PDF).
+
+    Возвращает код завершения: 0 — успех, 1 — ошибка при создании PDF
+    (Excel при этом СОХРАНЯЕТСЯ и не удаляется; проблема явно выводится).
+    Логика сегментации/классификации и бизнес-правила не затрагиваются.
+    """
     input_file = args.input
     output_file = args.output or input_file_path_to_final(input_file)
+    output_file = str(Path(output_file).expanduser())
+    # PDF-отчёт: тот же путь, расширение .pdf (рядом с Excel)
+    output_pdf = str(Path(output_file).with_suffix(".pdf"))
+    # Дата отчёта из имени файла (YYYY-MM-DD); fallback — текущая (как в input_file_path_to_final)
+    output_date = extract_report_date(output_file)
     debug_path = args.debug or str(Path(output_file).with_name(Path(output_file).stem + "_debug.json"))
 
     # 1) SEGMENTATION (без client_id)
     client = BigBudgetLLM(model=args.model)
+
+    # --- EXPERIMENT: sales ground-truth (только если задан --sales-ground-truth) ---
+    sales_gt: list = []
+    sales_meta: dict | None = None
+    if getattr(args, "sales_ground_truth", None):
+        report_date = extract_report_date(output_file or args.input)
+        m = re.search(r"(\d{4})-(\d{2})-(\d{2})", report_date)
+        gt_day = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else datetime.now()
+        sales_gt, sales_meta = _sales.load_sales_ground_truth(args.sales_ground_truth, day=gt_day)
+        print("SALES-GROUND-TRUTH (EXPERIMENT MODE)")
+        print(f"  file           : {args.sales_ground_truth}")
+        print(f"  records        : {sales_meta['n_records']} "
+              f"(покупок={sales_meta['n_purchase']}, возвратов={sales_meta['n_return']})")
+        print(f"  stores in GT   : {sales_meta['stores_sorted']}")
+        print(f"  candidate_win  : +/-{args.sales_candidate_window}s")
+        print(f"  core_window    : +/-{args.sales_window}s")
 
     # --- Явный баннер пайплайна: чтобы нельзя было спутать новый и старый offline ---
     # (требование: в nightly-логе должно быть видно, какой именно pipeline запущен).
@@ -527,8 +727,10 @@ def run(args) -> int:
     print(f"workers      : {args.workers}")
     print(f"retries      : {args.retries}")
     print(f"confidence_min: {args.confidence_min}")
+    print(f"resplit_long : {'off' if args.no_resplit else 'on'}")
     print(f"input        : {input_file}")
     print(f"output       : {output_file}")
+    print(f"output_pdf   : {output_pdf}")
 
     sheets = load_raw(input_file)
     total_rows = sum(len(df) for _, df in sheets)
@@ -540,12 +742,14 @@ def run(args) -> int:
     all_segments: list[Segment] = []
     all_results: dict[int, dict] = {}
     day_size = {"rows": 0, "characters": 0, "estimated_tokens": 0}
+    resplit_sink: dict = {}
     for store_id, rows in store_rows:
         size = measure_rows(rows)
         log_size(f"STORE {store_id}", size)
         day_size["rows"] += size.rows
         day_size["characters"] += size.characters
         day_size["estimated_tokens"] += size.estimated_tokens
+        _store_snippet = _sales_snippet_for_store(sales_gt, store_id) if sales_gt else None
         segments = segment_rows(
             rows,
             llm=client,
@@ -553,9 +757,29 @@ def run(args) -> int:
             target_chunk_tokens=args.target_chunk_tokens,
             verbose=not args.quiet,
             retries=args.retries,
+            resplit_long=not args.no_resplit,
+            metrics_sink=resplit_sink,
+            sales_snippet=_store_snippet,
         )
         all_segments.extend(segments)
     print(f"Сегментация: {len(all_segments)} сегментов дня")
+
+    # Контроль качества: сколько подозрительно длинных dialog-сегментов проверено
+    # и сколько из них разбито на несколько клиентов (новый механизм re-split).
+    if resplit_sink.get("candidates"):
+        print(
+            f"Re-split длинных диалогов: {resplit_sink.get('candidates')} проверено, "
+            f"{resplit_sink.get('resegmented')} разбито "
+            f"(LLM-вызовов: {resplit_sink.get('llm_calls')})"
+        )
+    dur_metrics = duration_metrics(all_segments)
+    if dur_metrics.get("count"):
+        print(
+            f"Длительности dialog: max={dur_metrics['max_sec'] / 60:.0f}м "
+            f"p95={dur_metrics['p95_sec'] / 60:.0f}м "
+            f">30м={dur_metrics['gt_30min']} >60м={dur_metrics['gt_60min']} "
+            f">90м={dur_metrics['gt_90min']} >120м={dur_metrics['gt_120min']}"
+        )
 
     # 2) CLASSIFICATION ТОЛЬКО dialog-сегментов (после segmentation)
     targets = [
@@ -564,7 +788,10 @@ def run(args) -> int:
     if len(targets) > 1 and args.workers > 1:
         with ThreadPoolExecutor(max_workers=args.workers) as pool:
             futs = {
-                pool.submit(classify_segment, client, seg, idx, args.retries, not args.quiet): idx
+                pool.submit(
+                    classify_segment, client, seg, idx, args.retries, not args.quiet,
+                    _sales_snippet_for_store(sales_gt, seg.store_id) if sales_gt else None,
+                ): idx
                 for idx, seg in targets
             }
             for fut in as_completed(futs):
@@ -572,22 +799,94 @@ def run(args) -> int:
                 all_results[idx] = fut.result()
     else:
         for idx, seg in targets:
-            all_results[idx] = classify_segment(client, seg, idx, args.retries, not args.quiet)
+            all_results[idx] = classify_segment(
+                client, seg, idx, args.retries, not args.quiet,
+                _sales_snippet_for_store(sales_gt, seg.store_id) if sales_gt else None,
+            )
 
     # 3) финальный отчёт (display client_id назначается ПОСЛЕ segmentation)
     final_rows, rejected = build_final_rows(all_segments, all_results, args.confidence_min)
+
+    # --- EXPERIMENT: sales ground-truth postprocessing ---
+    # Сопоставляем sales-записи с final-диалогами. Применяем принудительные
+    # поправки (ENFORCE_BUY / ENFORCE_BUY_WRONGTYPE) и пишем sales_matching_*.xlsx.
+    # Без --sales-ground-truth ничего не происходит.
+    sales_results = None
+    sales_metrics = None
+    sales_corrections: list[dict] = []
+    if sales_gt:
+        # 1-й pass: "до применения принудительных поправок" — фиксируем status,
+        # чтобы в отчёте видеть, какие диалоги были «не-buy» до коррекции.
+        sales_results = _sales.match_sales_to_dialogs(
+            sales_gt, final_rows,
+            core_window_sec=args.sales_window,
+            candidate_window_sec=args.sales_candidate_window,
+        )
+        # применяем принудительные поправки (mutates all_results + final_rows)
+        sales_corrections = enforce_ground_truth(
+            all_segments, all_results, final_rows, sales_gt,
+            candidate_window_sec=args.sales_candidate_window,
+            verbose=not args.quiet,
+        )
+        # 2-й pass: после принудительных поправок — пересчитываем статус.
+        sales_results = _sales.match_sales_to_dialogs(
+            sales_gt, final_rows,
+            core_window_sec=args.sales_window,
+            candidate_window_sec=args.sales_candidate_window,
+        )
+        sales_metrics = _sales.sales_metrics(sales_results, final_rows)
+        print("\nSALES-GROUND-TRUTH — METRICS")
+        for k, v in sales_metrics.items():
+            print(f"  {k:22}: {v}")
+        # пишем sales_matching_<date>.xlsx
+        report_date = extract_report_date(output_file)
+        matching_path = str(Path(output_file).parent / "sales_matching_" + report_date + ".xlsx")
+        _sales.write_matching_xlsx(
+            sales_results, final_rows, matching_path,
+            meta=sales_meta, metrics=sales_metrics,
+        )
+        print(f"SALES-MATCHING-REPORT: {matching_path}")
+
     write_excel(final_rows, output_file)
-    write_debug(all_segments, all_results, rejected, total_rows, day_size, debug_path)
+    write_debug(
+        all_segments, all_results, rejected, total_rows, day_size, debug_path,
+        extra={"re_long_split": resplit_sink or None},
+    )
     if args.debug_dir:
         Path(args.debug_dir).mkdir(parents=True, exist_ok=True)
         import shutil
         shutil.copy(debug_path, str(Path(args.debug_dir) / Path(debug_path).name))
 
+    # 3.5) PDF-отчёт (те же final_rows, без повторного LLM-запуска).
+    # ВАЖНО: Excel — критический артефакт и уже создан выше. Если PDF не удалось
+    # создать — НЕ удаляем Excel, явно выводим ошибку и отражаем проблему в exit-code,
+    # но НЕ маскируем исключение. Статистика/примеры печатаются ВСЕГДА.
+    pdf_ok = True
+    if not getattr(args, "no_pdf", False):
+        try:
+            pdf_path = generate_pdf_report(final_rows, output_pdf, report_date=output_date)
+            print(f"PDF-отчёт создан: {pdf_path}")
+        except Exception as exc:  # noqa: BLE001 — не проглатываем, явно сообщаем
+            pdf_ok = False
+            print(
+                f"[ERR] PDF-отчёт не создан: {exc!r}",
+                file=sys.stderr,
+            )
+            print(
+                f"    Excel сохранён: {output_file}",
+                file=sys.stderr,
+            )
+
     # 4) статистика + первичные сегменты
     print_stats(total_rows, day_size, all_segments, all_results, final_rows, input_file, output_file)
     if not args.no_examples:
         show_first_segments(all_segments, all_results, n=args.first_segments)
-    print("\nDONE")
+
+    if pdf_ok:
+        print("\nDONE")
+    else:
+        print("\nDONE (PDF generation failed — see [ERR] above)", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -596,6 +895,16 @@ def input_file_path_to_final(input_file: str) -> str:
     m = re.search(r"(\d{4}-\d{2}-\d{2})", p.stem)
     date_part = m.group(1) if m else time.strftime("%Y-%m-%d")
     return str(p.parent / f"final_transcript_report_{date_part}.xlsx")
+
+
+def extract_report_date(output_file: str) -> str:
+    """Извлекает дату (YYYY-MM-DD) из имени файла отчёта.
+
+    Используют её и для PDF-заголовка. Если в имени нет даты — текущая дата,
+    что согласуется с поведением ``input_file_path_to_final``.
+    """
+    m = re.search(r"(\d{4}-\d{2}-\d{2})", Path(output_file).stem)
+    return m.group(1) if m else time.strftime("%Y-%m-%d")
 
 
 def main() -> int:
@@ -627,6 +936,29 @@ def main() -> int:
     parser.add_argument("--first-segments", type=int, default=10, help="сколько первых сегментов показать")
     parser.add_argument("--quiet", action="store_true", help="не печатать построчно")
     parser.add_argument("--no-examples", action="store_true", help="не показывать сегменты")
+    parser.add_argument(
+        "--no-pdf", action="store_true",
+        help="пропустить генерацию PDF-отчёта (Excel создаётся всегда)",
+    )
+    parser.add_argument(
+        "--no-resplit", action="store_true",
+        help="отключить дополнительный LLM-проход re-split длинных dialog-сегментов (по умолчанию включён)",
+    )
+    # --- EXPERIMENT: sales ground-truth (off by default; без флага pipeline работает как раньше) ---
+    parser.add_argument(
+        "--sales-ground-truth", default=None,
+        help="EXPERIMENT: путь к Excel 'Документы продаж' (ground truth). "
+             "Без этого флага поведение pipeline не меняется.",
+    )
+    parser.add_argument(
+        "--sales-window", type=int, default=300,
+        help="EXPERIMENT: core-окно (сек) вокруг времени продажи для candidate-диалога (по умолчанию 300)",
+    )
+    parser.add_argument(
+        "--sales-candidate-window", type=int, default=600,
+        help="EXPERIMENT: candidate-окно (сек); диалог попадает в candidate если sale внутри "
+             "[start-окно, end+окно] (по умолчанию 600)",
+    )
     args = parser.parse_args()
 
     if not args.input:
