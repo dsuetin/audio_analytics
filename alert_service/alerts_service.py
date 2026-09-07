@@ -6,7 +6,7 @@ import asyncpg
 
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 
-from alert_service.telegram_bot import TelegramBot
+from alert_service.notifications import create_notification_sender
 from alert_service.metadata import parse_session_metadata
 from alert_service.config import (
     TRIGGER_PHRASES,
@@ -52,25 +52,17 @@ class AlertService:
         self.producer = None
         self.db = None
 
-
         # чтобы одно событие не стреляло 100 раз
         self.fired_sessions = set()
         self.purchase_sessions = set()
         self.pending_salesperson = set()
 
-
-        token = os.getenv("TELEGRAM_TOKEN")
-        if not token:
-            raise RuntimeError("TELEGRAM_TOKEN is not set in environment variables")
-        
-        print("token", token)
-
-        self.telegram = TelegramBot(token)
-        
-
-        self.telegram_chat_id = os.getenv(
-            "TELEGRAM_CHAT_ID",
-            "114987350",
+        # Канал доставки уведомлений (telegram | max).
+        # Бизнес-логика не знает деталей API мессенджера — только NotificationSender.
+        self.notification_sender = create_notification_sender()
+        logger.info(
+            "📣 notification channel: %s",
+            self.notification_sender.name,
         )
 
 
@@ -102,21 +94,17 @@ class AlertService:
         logger.info("🚨 ALERT SERVICE STARTED")
 
 
-    async def send_telegram(self, text):
-
-        if not self.telegram_chat_id:
-            return
+    async def send_notification(self, text):
 
         try:
             await asyncio.to_thread(
-                self.telegram.send_message,
-                self.telegram_chat_id,
+                self.notification_sender.send,
                 text,
             )
 
         except Exception:
             logger.exception(
-                "telegram error"
+                "notification send error"
             )
 
 
@@ -229,7 +217,7 @@ class AlertService:
                     payload,
                 ),
                 self.save_alarm(session_id),
-                self.send_telegram(
+                self.send_notification(
                     f"🚨 Alert\n\n"
                     f"Store: {store_id}\n"
                     f"Session: {session_id}\n\n"

@@ -1,5 +1,8 @@
 # Audio Analytics
 
+> **Для OpenCode/агентов:** точка входа — `AGENTS.md`. Текущее состояние проекта —
+> `CURRENT_STATUS.md`. Задачи (P0/P1/P2) — `TODO.md`.
+
 Система аудиоаналитики для магазинов: слушает разговоры через
 микрофон, распознаёт речь, классифицирует диалоги, фиксирует
 покупки, возражения и смену продавцов — и формирует ежедневные
@@ -16,8 +19,12 @@
   → Kafka asr_transcripts + PostgreSQL (transcripts)
   → classification_service (dialog_type) + alert_service
     (покупка / возражение / смена продавца → Telegram)
-  → daily stats: Excel/PDF отчёты + Ollama (qwen3.8:27b)
-```
+   → daily stats: Excel/PDF отчёты + Ollama (qwen3.8:27b)
+ ```
+
+> **Offline-конвейер** (`offline_analysis/`) — отдельный LLM-контур поверх сырых дневных
+> Excel: segmentation → re-split → classification → XLSX + PDF из одних `final_rows`.
+> Текущее состояние и конфиг — `CURRENT_STATUS.md`; задачи — `TODO.md`.
 
 Диаграммы (flow + sequence) и детальный разбор — в
 `docs/architecture.md`.
@@ -30,7 +37,7 @@
 | `vad-client` | `client/client_vad_service.py` | gRPC-гейтвей `AudioBridge` + VAD (Triton `online_vad`) |
 | `asr_worker` | `asr_worker/` | S3 → Triton EMformer → `asr_transcripts` + Postgres |
 | `classification_service` | `classification/` | классификация диалога (`classified_events`) |
-| `alert_service` | `alert_service/` | покупка/возражение/смена продавца, Telegram |
+| `alert_service` | `alert_service/` | покупка/возражение/смена продавца, уведомление (Telegram/MAX) |
 | `daily_stats_scheduler` | `stats_service/scheduler.py` | ежедневный raw-отчёт + LLM-анализ |
 | `daily_stats_api` | `stats_service/api.py` | HTTP-API выдачи final-отчётов (`:8000`) |
 | (вне compose) | `windows_autorun/client.py` | клиент на ПК магазина: микрофон + лог/GUI |
@@ -50,7 +57,9 @@ pgAdmin, Redpanda Console, два Triton с GPU (`asr`, `vad`).
 
 ```bash
 # 0) секреты — рядом с docker-compose.yml:
-#    .env  →  TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
+#    .env  →  NOTIFICATION_CHANNEL (telegram|max) + креденшелы канала:
+#             telegram: TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
+#             max:      MAX_BOT_TOKEN, MAX_CHAT_ID
 #    (значения по умолчанию в .env — заменить на свои, не коммитить токены)
 
 docker compose up -d --build
@@ -86,6 +95,9 @@ Smoke-тест end-to-end без живого микрофона (WAV-файл):
 
 | Документ | Содержимое |
 |---|---|
+| `AGENTS.md` | точка входа для OpenCode/агентов, ключевые правила |
+| `CURRENT_STATUS.md` | **текущее состояние** проекта (работает, конфиг LLM, последний run, эксперименты, «что нельзя сломать») |
+| `TODO.md` | активные задачи P0/P1/P2 + DONE-история |
 | `docs/architecture.md` | архитектура, диаграммы (Mermaid), сеть/порты |
 | `docs/services.md` | описание каждого сервиса |
 | `docs/data-flow.md` | переход «кто → кому → по какому каналу → что» |
@@ -111,7 +123,9 @@ Kafka/Postgres/MinIO/Triton недоступны, текст не попадае
 
 | Переменная | Для чего | Где |
 |---|---|---|
-| `TELEGRAM_TOKEN`, `TELEGRAM_CHAT_ID` | **обязательны** для `alert_service` | `.env` (корень) |
+| `NOTIFICATION_CHANNEL` | **опция** — канал уведомлений `alert_service`: `telegram`/`max` (авто — по креденшелам) | `.env` (корень) |
+| `TELEGRAM_TOKEN`, `TELEGRAM_CHAT_ID` | **обязательны** для `alert_service`, если канал = `telegram` | `.env` (корень) |
+| `MAX_BOT_TOKEN`, `MAX_CHAT_ID` | **обязательны** для `alert_service`, если канал = `max` | `.env` (корень) |
 | `SERVER_IP`, `STORE_ID`, `WORKER_NAME`, `AUDIO_DEVICE` | PC-клиент магазина | `windows_autorun/.env` |
 | `OLLAMA_HOST`, `OFFLINE_LLM_MODEL`, `OFFLINE_ANALYSIS_ENABLED` | LLM-шаг дневного отчёта | `.env` (корень), default в compose |
 | `REPORT_TIMEZONE`, `REPORT_OUTPUT_DIR` | отчёты | compose (default Europe/Moscow, `./reports`) |

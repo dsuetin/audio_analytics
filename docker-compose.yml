@@ -375,6 +375,7 @@ services:
       POSTGRES_DSN: postgresql://speech:speech@postgres:5432/speech_db
 
       PYTHONUNBUFFERED: 1
+      NOTIFICATION_CHANNEL: ${NOTIFICATION_CHANNEL:-}
       MAX_BOT_TOKEN: ${MAX_BOT_TOKEN}
       MAX_CHAT_ID: ${MAX_CHAT_ID}
 
