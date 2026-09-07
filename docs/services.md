@@ -234,7 +234,8 @@ Business-правила поверх транскриптов: «возраже�
 (`TRIGGER_PHRASES`), «покупка» (`BUY_PHRASES`), «смена продавца»
 (`SALESPERSON_PHRASES` → финальный фрагмент, извлечение
 имени+фамилии). Публикует `alerts`, `purchases`, `salesperson_changes`,
-пишет флаги в Postgres, шлёт Telegram-уведомления по триггерам.
+пишет флаги в Postgres, шлёт уведомления по триггерам в настроенный
+мессенджер (Telegram или MAX — через `NotificationSender`).
 `alert_service/alerts_service.py:176-347`.
 
 **Input**
@@ -249,8 +250,10 @@ Kafka `asr_transcripts` (group `alerts-service`).
   (297-347).
 - Postgres: `is_alarm_triggered`, `is_sale`, `seller_id`
   (`alerts_service.py:123-161`).
-- Telegram: `TelegramBot.send_message` в `TELEGRAM_CHAT_ID`
-  (`alerts_service.py:105-125`, `telegram_bot.py`).
+- Уведомление (канал по `NOTIFICATION_CHANNEL`):
+  - Telegram: `TelegramBot.send_message` в `TELEGRAM_CHAT_ID` (`telegram_bot.py`);
+  - MAX: `MaxClient.send_message` в `MAX_CHAT_ID` (`max_bot.py`).
+  (`alerts_service.py:99-110`, `notifications.py` — `NotificationSender`).
 
 **Logic и пороги**
 - Совпадение фраз — `find_phrase` (stemming + до `MAX_GAP=5` слов
@@ -269,21 +272,25 @@ Kafka `asr_transcripts` (group `alerts-service`).
   проверки**).
 
 **Dependencies**
-Kafka + Postgres + Telegram API (external). `depends_on: [redpanda, postgres]`.
+Kafka + Postgres + мессенджер (Telegram API и/или MAX API, external).
+`depends_on: [redpanda, postgres]`.
 
 **Configuration**
 `KAFKA_INPUT_TOPIC`, `KAFKA_ALERT_TOPIC`, `KAFKA_PURCHASE_TOPIC`,
 `KAFKA_SALESPERSON_TOPIC` (через env: alerts_service.py:31-49;
 значения из `.env` через `env_file: .env`).
-`TELEGRAM_TOKEN`, `TELEGRAM_CHAT_ID` (56-74).
+`NOTIFICATION_CHANNEL` (`telegram`|`max`, авто — см. `notifications.py`),
+`TELEGRAM_TOKEN`+`TELEGRAM_CHAT_ID` (канал telegram),
+`MAX_BOT_TOKEN`+`MAX_CHAT_ID` (канал max).
 `POSTGRES_*` / `POSTGRES_DSN`.
 
 **Runtime**
 `python -m alert_service.alerts_service`.
 
 **Healthcheck**
-`🚨 ALERT SERVICE STARTED`. Без Telegram-токена — `RuntimeError`
-(63-64), т.е. сервис не стартует без `TELEGRAM_TOKEN`.
+`🚨 ALERT SERVICE STARTED` + `📣 notification channel: <telegram|max>`.
+Без настроенного канала (нет креденшелов) — `RuntimeError`
+(`notifications.py`), т.е. сервис не стартует.
 
 **Logs**
 `docker compose logs -f alert-service`.

@@ -40,9 +40,11 @@ compose ссылается на уже собранные:
 
 | Переменная | Сервис | Обязательность | Значение по умолчанию | Смысл |
 |---|---|---|---|---|
-| `TELEGRAM_TOKEN` | alert_service (`env_file: .env`) | **обязательна** | — | без неё сервис не стартует (`alerts_service.py:63-64`) |
-| `TELEGRAM_CHAT_ID` | alert_service (`env_file: .env`) | **обязательна** (иначе алерты не уедут) | — | чат уведомлений |
-| `MAX_BOT_TOKEN`, `MAX_CHAT_ID` | alert_service (compose 378-379) | **неизвестно** | — | переменные не используются в коде `alert_service`; **Требует проверки** |
+| `NOTIFICATION_CHANNEL` | alert_service | опц. | авто | канал уведомления: `telegram`|`max`; пустое = авто (telegram, если задан `TELEGRAM_TOKEN`, иначе max) |
+| `TELEGRAM_TOKEN` | alert_service (`env_file: .env`) | обязат., если канал=telegram | — | токен бота; без него при канале telegram сервис не стартует |
+| `TELEGRAM_CHAT_ID` | alert_service (`env_file: .env`) | обязат., если канал=telegram | `114987350` | чат уведомлений |
+| `MAX_BOT_TOKEN` | alert_service (`env_file: .env`) | обязат., если канал=max | — | `access_token` бота MAX (`business.max.ru/self` → Чат-боты → токен) |
+| `MAX_CHAT_ID` | alert_service (`env_file: .env`) | обязат., если канал=max | — | `chat_id` (int64) целевого чата/канала — от куда его взять: см. `dev.max.ru/docs-api` → «Получение chat_id» |
 | `OLLAMA_HOST` | daily_stats_scheduler | опц. | `http://172.18.0.1:11434` | адрес Ollama; из сети compose loopback не доступен, отсюда 172.18.0.1 (default bridge gateway) |
 | `OFFLINE_LLM_MODEL` | daily_stats_scheduler | опц. | `qwen3.8:27b` | модель |
 | `OFFLINE_ANALYSIS_ENABLED` | daily_stats_scheduler | опц. | `1` | `0` — только raw-отчёт |
@@ -108,7 +110,11 @@ CREATE TABLE IF NOT EXISTS transcripts (
 );
 SQL
 
-# 4) (один раз) в .env рядом с compose задать TELEGRAM_TOKEN / TELEGRAM_CHAT_ID
+# 4) (один раз) в .env рядом с compose задать credentials уведомления:
+#    канал выбирает NOTIFICATION_CHANNEL:
+#      telegram:  TELEGRAM_TOKEN / TELEGRAM_CHAT_ID
+#      max:       MAX_BOT_TOKEN / MAX_CHAT_ID   (см. «Проверка MAX отправки»)
+#    (оставить TELEGRAM_* как fallback, если канал пустой)
 
 # 5) up:
 docker compose up -d --build
@@ -181,6 +187,28 @@ curl -s http://localhost:8001/v2/health/ready
 # gRPC health: отсутствие ошибок `gRPC error:` в логах клиентов.
 ```
 
+### 5.3a Ручная проверка отправки в MAX
+
+Чтобы проверить канал MAX **без живого триггера**, выполните в контейнере один
+запрос к API по формуле из `alert_service/max_bot.py` (текст — тот же, что шлёт
+alert_service):
+
+```bash
+docker compose exec -it alert-service python - <<'PY'
+import os
+from alert_service.max_bot import MaxClient
+client = MaxClient(os.environ["MAX_BOT_TOKEN"])
+print(client.send_message(
+    text="🚨 Alert\n\nStore: manual\nSession: manual-test\n\nРучная проверка MAX",
+    chat_id=os.environ["MAX_CHAT_ID"],
+))
+PY
+```
+
+Коды: `200` = ок; `401` = неверный/отозванный `MAX_BOT_TOKEN`;
+`403/404` = бот не добавлен в чат с таким `MAX_CHAT_ID`;
+`429` = превышен лимит 2 сообщения/сек в один чат. См. `dev.max.ru/docs-api`.
+
 ### 5.3 Smoke test (end-to-end, без живого микрофона)
 
 ```bash
@@ -213,8 +241,8 @@ docker compose logs alert-service | egrep "ALERT|PURCHASE|SALESPERSON"
    `🏁 ...` (final).
 4. В Postgres — строка с `is_final=true`, `recognition_text` заполнен.
 5. В `classified_events` (виден в Redpanda Console) — текущий `label`.
-6. Фраза «слишком дорого» → в Telegram приходит 🚨; в Postgres
-   `is_alarm_triggered=true`.
+6. Фраза «слишком дорого» → в настроенный мессенджер (`NOTIFICATION_CHANNEL`,
+   см. 5.3a) приходит 🚨; в Postgres `is_alarm_triggered=true`.
 7. Фраза «купить аккумулятор/беру» → в Postgres `is_sale=true`,
    в логе PC-клиента 💰.
 8. Продавец говорит «имя консультанта Петров Пётр» + пауза →

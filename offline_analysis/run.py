@@ -418,9 +418,16 @@ def write_debug(
             "llm_error": r.get("llm_error") if r else None,
         })
 
-    # покрытие: union строк == все строки дня
-    covered = [i for s in segments for i in range(s.start_index, s.end_index + 1)]
-    coverage_ok = (set(covered) == set(range(total_input_rows)) and len(covered) == total_input_rows)
+    # покрытие: сумма row_count по сегментам == все строки дня (без потерь и дублей).
+    # ВАЖНО: индексы start_index/end_index сегментов — PER-STORE (см. segmentation.py),
+    # union по ним в пересчёте покрытия НЕКОНКУРЕНТЕН для нескольких магазинов;
+    # корректная метрика «нет lost/dup» — сумма row_count.
+    covered_rows_sum = sum(
+        s.row_count if getattr(s, "row_count", None) is not None
+        else (s.end_index - s.start_index + 1)
+        for s in segments
+    )
+    coverage_ok = (covered_rows_sum == total_input_rows)
 
     payload = {
         "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -432,7 +439,7 @@ def write_debug(
         "rejected_segments": len(rejected),
         "coverage": {
             "ok": coverage_ok,
-            "covered_rows": len(covered),
+            "covered_rows": covered_rows_sum,
             "total_rows": total_input_rows,
         },
         "dialog_duration_metrics": duration_metrics(segments),

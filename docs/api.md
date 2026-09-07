@@ -88,16 +88,22 @@ ls reports/final_transcript_report_*.xlsx
 > который заранее сгенерировал `daily_stats_scheduler`. 404, если
 > файла нет в `REPORT_OUTPUT_DIR`.
 
-## 3. Telegram (входящий/исходящий)
+## 3. Уведомления (исходящие): Telegram / MAX
 
-- Исходящие уведомления: `alert_service` →
+Канал выбирается `NOTIFICATION_CHANNEL` (`telegram`|`max`, см.
+`alert_service/notifications.py` + `create_notification_sender`). Бизнес-логика
+`alert_service` не знает деталей API конкретного мессенджера — только
+`NotificationSender.send(text)`.
+
+- **Telegram**: `alert_service` →
   `https://api.telegram.org/bot<TELEGRAM_TOKEN>/sendMessage`
-  (`alert_service/telegram_bot.py:1-31`), chat_id из
-  `TELEGRAM_CHAT_ID`.
-- В репозитории есть also `tests/test_max_bot.py` — клиент API
-  `platform-api2.max.ru` (Max-мессенджер). **Не задействован** в
-  `alert_service` (там подключён `TelegramBot`). **Требует
-  проверки**: является ли `MaxBot` планом миграции.
+  (`alert_service/telegram_bot.py`), чат из `TELEGRAM_CHAT_ID`.
+- **MAX**: `alert_service` → `POST https://platform-api2.max.ru/messages?chat_id=<MAX_CHAT_ID>`,
+  заголовок `Authorization: <MAX_BOT_TOKEN>`, тело `{"text": "...", "notify": true}`
+  (`alert_service/max_bot.py`). Офиц. API — `dev.max.ru/docs-api`.
+  Лимит: 2 сообщения/сек в один чат, текст ≤ 4000 символов.
+- Тесты: `tests/test_max_bot.py` (URL/заголовки/тело, 4xx/5xx, фабрика канала,
+  текст уведомления `AlertService`).
 
 ## 4. Redpanda admin API
 

@@ -142,7 +142,7 @@ EMformer задан внутри образа `asr`). Состав моделе�
 | `vad-client` | `client/client_vad_service.py` | gRPC-гейтвей `AudioBridge`: VAD-сегментация + прокидывание «речи» дальше |
 | `asr_worker` | `asr_worker/` | ASR: S3 → PCM → Triton → текст → Kafka + Postgres |
 | `classification_service` | `classification/` | классификация диалога по фразам, диалоги/клиенты |
-| `alert_service` | `alert_service/` | возражения / покупка / смена продавца, Telegram |
+| `alert_service` | `alert_service/` | возражения / покупка / смена продавца, уведомление (Telegram/MAX) |
 | `daily_stats_scheduler` | `stats_service/scheduler.py` | ежедневный raw-отчёт + offline LLM-анализ |
 | `daily_stats_api` | `stats_service/api.py` | HTTP API выдачи готовых final-отчётов |
 | (вне compose) | `windows_autorun/client.py` | клиент на ПК магазина: микрофон → gRPC; Kafka → лог/GUI |
@@ -235,10 +235,11 @@ EMformer задан внутри образа `asr`). Состав моделе�
   `TRIGGER_PHRASES` идёт **до** проверки покупки и смены
   продавца, и после срабатывания делает `return` (одна фраза-триггер
   «съедает» событие).
-- `alert_service/alerts_service.py:66` — `print("token", token)` —
-  в лог уходит TELEGRAM_TOKEN. Рекомендуется убрать.
-- `.env` содержит **реальный** Telegram-Bot-Token
-  (`alert_service` подхватывает его через `env_file: .env`).
+- `alert_service/alerts_service.py` — при старте логируется только
+  канал уведомления (`📣 notification channel: <telegram|max>`),
+  токен в лог не уходит (старый `print("token", ...)` удалён).
+- `.env` содержит **реальный** Telegram-Bot-Token и (опц.) MAX-токен
+  (`alert_service` подхватывает их через `env_file: .env`).
   Токен должен быть выключен из git (`.gitignore` не покрывает `.env`
   в корне — **Требует проверки**).
 - `classification/service.py:169-172` — «working»-гистограмма

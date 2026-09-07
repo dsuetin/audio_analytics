@@ -11,8 +11,10 @@ docker compose logs --tail 100 <service>
 ```
 
 Типичные:
-1. **alert_service падает при старте** — нет `TELEGRAM_TOKEN`
-   (обязателен): `alerts_service.py:63-64` поднимает `RuntimeError`.
+1. **alert_service падает при старте** — не задан канал уведомлений:
+   нужен `NOTIFICATION_CHANNEL=telegram|max` (или автоопределение) и
+   соответствующие креденшелы (`TELEGRAM_TOKEN`+`TELEGRAM_CHAT_ID` или
+   `MAX_BOT_TOKEN`+`MAX_CHAT_ID`): `notifications.py` поднимает `RuntimeError`.
 2. **asr_worker не подключается к Postgres** — нет ДСН или БД не
    поднята: `main.py:57-61`; ищите `POSTGRES POOL STARTED` —
    если нет, DB недоступна.
@@ -168,9 +170,14 @@ asr_worker(Kafka(`asr_transcripts`)) → alert_service.
 3. Если нет — проверьте `TRIGGER_PHRASES` / `BUY_PHRASES` /
    `SALESPERSON_PHRASES` в `alert_service/config.py` и
    `MAX_GAP` (`config.py:79`): возможно, фраза «не совпала» из-за
-   стемминга (snowball, russ) — `text_matcher.py:1-15`.
-4. Telegram: нет `token` / `chat_id` — в `alerts_service.py:105-125`;
-   ошибки — `logger.exception("telegram error")` (строка 120).
+    стемминга (snowball, russ) — `text_matcher.py:1-15`.
+ 4. Уведомление ушло? — канал задаётся `NOTIFICATION_CHANNEL`
+    (telegram|max, см. `notifications.py`) и креденшелы в `.env`.
+    При отправке в MAX: `max_bot.py` шлёт `POST platform-api2.max.ru/messages`
+    с токеном в заголовке `Authorization`. Ошибки —
+    `logger.exception("notification send error")` в `alerts_service.py:`
+    HTTP 401 = неверный/отозванный токен; 4xx/5xx = см. коды в dev.max.ru;
+    бот должен быть добавлен в целевой чат/канал.
 
 ## 10. Смена продавца не работает
 

@@ -89,12 +89,12 @@ payload'ами из кода.
 - Выход Postgres: `UPDATE transcripts SET dialog_type=...` /
   `SET client_id=...`.
 
-## Переход 6. alert_service: asr_transcripts → alerts/purchases/salesperson_changes + Postgres + Telegram
+## Переход 6. alert_service: asr_transcripts → alerts/purchases/salesperson_changes + Postgres + уведомление (Telegram/MAX)
 
 - Consumer: `asr_transcripts` (group `alerts-service`).
 - Триггеры (порядок важен — `alerts_service.py:203-347`):
   1. `TRIGGER_PHRASES` (возражение) → topic `alerts`,
-     Telegram, `is_alarm_triggered=TRUE`, `return`.
+     уведомление (Telegram/MAX по `NOTIFICATION_CHANNEL`), `is_alarm_triggered=TRUE`, `return`.
   2. `BUY_PHRASES` (покупка) → topic `purchases`, `is_sale=TRUE`,
      `return`.
   3. `SALESPERSON_PHRASES` + финальный фрагмент → topic

@@ -152,12 +152,25 @@ def build_long_dialog_resegment_prompt(
     store_id: str,
     rows: Sequence,
     is_very_long: bool = False,
+    greet_count: int | None = None,
+    end_count: int | None = None,
+    forced: bool = False,
 ) -> str:
     """Пользовательский prompt для дополнительного разделения длинного dialog-сегмента.
 
     ``rows`` — именно тот блок строк, который первичная сегментация оставила
     единым. Индексы ГЛОБАЛЬНЫЕ (Row.index), т.к. Segment.start_index/end_index
     тоже глобальные.
+
+    ``greet_count`` / ``end_count`` — детерминированный счётчик приветствий
+    и маркеров завершения (чек/оплата/прощание) в блоке. Выдаётся LLM-модели
+    как ФАКТ, чтобы она не «забыла» маркеры (см. checkpoint §3.2). Для одного
+    действительно длинного разговора счётчик ``greet_count == 1`` — LLM
+    честно вернёт segments:[]. Для 2+ независимых приветствий счётчик
+    ``greet_count >= 2`` — ЛЛМ ОБЯЗАНА начать искать границы.
+
+    ``forced`` — сегмент попал на ре-сплит НЕ по длительности, а по
+    force-trigger (например, ≥2 приветствия в блоке < 30 мин).
     """
     lines = []
     for r in rows:
@@ -178,11 +191,47 @@ def build_long_dialog_resegment_prompt(
         "непрерывная покупка с одним клиентом — оставь как есть (segments:[]).\n\n"
     )
 
+    # --- Счётчик маркеров как ФАКТ (checkpoint §3.2) ---
+    marks_facts: list[str] = []
+    if greet_count is not None:
+        marks_facts.append(
+            f"  приветствий (здравствуйте/добрый день/добрый вечер): {greet_count}"
+        )
+    if end_count is not None:
+        marks_facts.append(
+            f"  завершений (чек/оплата/прощание/спасибо/бонусы): {end_count}"
+        )
+    if marks_facts:
+        marks_block = (
+            "FAKT (детерминированный счёт в блоке, выдан как данные, не как текст):\n"
+            + "\n".join(marks_facts)
+            + "\n"
+        )
+        if greet_count is not None and greet_count >= 2:
+            marks_block += (
+                f"  => {greet_count} независимых приветствий внутри ОДНОГО блока — "
+                "это ОБЯЗАТЕЛЬНО 2+ взаимодействий клиентов. Не верни segments:[]. "
+                "Верни 2+ сегмента, разделив по границам приветствий/завершений.\n"
+            )
+    else:
+        marks_block = ""
+
+    forced_note = (
+        "ВНИМАНИЕ: этот фрагмент попал на ре-сплит НЕ по длительности, а по "
+        "детерминированному маркеру (2+ приветствия внутри). Оставь единым "
+        "segments:[] только если это РЕАЛЬНО один клиент, повторившийся "
+        "внутрь разговора. Если приветствия относятся к разным клиентам — "
+        "разбей на блоки.\n\n"
+        if forced else ""
+    )
+
     return (
         f"КОНТЕКСТ:\n"
         f"  store_id: {store_id}\n"
         f"  fragment_rows: {first}..{last} (всего {len(rows)} строк)\n"
         f"  fragment_duration: {duration_text}\n\n"
+        f"{marks_block}"
+        f"{forced_note}"
         f"Поток реплик (формат: index | HH:MM:SS | текст, ASR содержит ошибки и шум):\n"
         f"{body}\n\n"
         f"{emphasis}"

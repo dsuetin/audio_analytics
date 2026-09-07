@@ -19,6 +19,8 @@ segmentation — сам поток реплик с временными метк
 
 from __future__ import annotations
 
+import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, Protocol, Sequence
@@ -500,10 +502,48 @@ def _format_rows_for_prompt(rows: list[Row]) -> str:
 # Пороги НЕ жёсткие: мы НЕ режем после N минут механически. LLM решает по смыслу
 # (завершение разговора, новое приветствие, завершённая покупка + новый клиент),
 # и МОЖЕТ вернуть segments:[] для действительно одного длинного разговора.
-REVIEW_LONG_SEC = 30 * 60
-VERY_LONG_SEC = 60 * 60
+REVIEW_LONG_SEC = int(os.getenv("OFFLINE_RESPLIT_REVIEW_SEC", str(30 * 60)))
+VERY_LONG_SEC = int(os.getenv("OFFLINE_RESPLIT_VERY_LONG_SEC", str(60 * 60)))
 # Лимит повторных обращений к LLM на один сегмент (защита от зацикливания).
 MAX_RESEGMENT_ATTEMPTS = 3
+
+# Притчетствие (ГЛАВНЫЙ маркер нового клиента). Паттерн — начало обращения
+# КЛИЕНТА/сотрудника, НЕ «добрый день» внутри одного разговора (отдельный
+# разговор — 2+ независимых приветствий подряд = 2 клиента).
+_RE_GREET = re.compile(
+    r"(?:^|\s)(здравств\w*|добрый\s+(?:день|вечер|утро)|добрый\w*|дарово|привет)\b",
+    re.IGNORECASE,
+)
+# Завершение (чек/оплата/прощание/выдача) — второй маркер, усиливает сигнал.
+_RE_END = re.compile(
+    r"(?:^|\s)(до\s+свидания|до\s+встреч|спасибо|вас\s+встретим|успех\w*|чека|чек|оплат\w*|"
+    r"терминал\w*|бонус\w*|гарантийн\w*)\b",
+    re.IGNORECASE,
+)
+
+
+def _grep_for_client_marks(rows: Sequence[Row]) -> tuple[int, int]:
+    """Детерминированный pre-flight счётчик приветствий/завершений в блоке.
+
+    Возвращает ``(greet_count, end_count)``. Служит:
+      * «force trigger» для re-сплита: если ``greet >= 2`` — сегмент попадает в
+        LLM-ревью, даже если ``dur < REVIEW_LONG_SEC`` (см. checkpoint §3.1.2);
+      * факт в пользовательском prompt — LLM «видит» маркеры как данные,
+        а не как текст (см. ``prompt.build_long_dialog_resegment_prompt``).
+
+    НЕ заменяет LLM-ревью. Просто меняет ШАНС попасть в проверку. Для одного
+    действительно длинного разговора (08-29 client_3, 58.7 мин) счётчик
+    обычно ``greet == 1`` и сегмент НЕ попадает в re-сплит (как сейчас).
+    """
+    greet = 0
+    end = 0
+    for r in rows:
+        text = r.text or ""
+        if not text.strip():
+            continue
+        greet += len(_RE_GREET.findall(text))
+        end += len(_RE_END.findall(text))
+    return greet, end
 
 
 def _parse_resegment_response(
@@ -639,13 +679,24 @@ def resplit_long_segments(
             new_segments.append(seg)
             continue
         dur = seg.duration_sec
-        if dur < review_min:
-            # не «подозрительно длинный» — пропускаем
+        seg_rows = rows[seg.start_index: seg.end_index + 1]
+        greet_n, end_n = _grep_for_client_marks(seg_rows)
+        # Кандидат на LLM-ревью, если:
+        #   * «подозрительно длинный» (dur > 30 мин), ИЛИ
+        #   * детерминированный force-trigger: ≥2 приветствия в блоке
+        #     (подтверждено на 08-27 client_3 и 08-25 client_11 —
+        #      3× и 2× «добрый день/вечер» в блоке, dur < 30 мин).
+        # force-trigger НЕ заменяет LLM-ревью: мы лишь даём шанс LLM
+        # честно ответить segments:[] (один клиент) или разбить блок
+        # (несколько клиентов), без ослабления критерия в промпте.
+        if dur < review_min and greet_n < 2:
+            # не «подозрительно длинный» и нет force-trigger — пропускаем
             new_segments.append(seg)
             continue
         candidates += 1
         is_very_long = dur >= very_min
-        seg_rows = rows[seg.start_index: seg.end_index + 1]
+        forced = (dur < review_min and greet_n >= 2)
+        reason = "long" + ("/forced-greet≥2" if forced else "")
 
         # 3-состоятельный результат LLM-проверки:
         #   []      -> «оставить как есть» (один разговор)
@@ -655,7 +706,13 @@ def resplit_long_segments(
         split_parts: list[dict] | None = None
         last_err: Exception | None = None
         for _attempt in range(MAX_RESEGMENT_ATTEMPTS):
-            user = build_long_dialog_resegment_prompt(store_id, seg_rows, is_very_long=is_very_long)
+            user = build_long_dialog_resegment_prompt(
+                store_id, seg_rows,
+                is_very_long=is_very_long,
+                greet_count=greet_n,
+                end_count=end_n,
+                forced=forced,
+            )
             # PRODUCTION-LIKE budget (matching segmentation primary call):
             # thinking-модель qwen3.8:27b требует num_ctx/num_predict с запасом,
             # иначе ответ не помещается в контекст и JSON не возвращается.
@@ -710,6 +767,9 @@ def resplit_long_segments(
                 "end_index": seg.end_index,
                 "duration_sec": round(dur, 1),
                 "subsegments": len(split_parts),
+                "reason": reason,
+                "greet_count": greet_n,
+                "end_count": end_n,
             })
             if verbose:
                 print(f"[re-split] {seg.segment_id} ({dur/60:.1f} min) -> {len(split_parts)} сегментов; "
@@ -723,6 +783,9 @@ def resplit_long_segments(
                 "end_index": seg.end_index,
                 "duration_sec": round(dur, 1),
                 "last_error": str(last_err) if last_err else None,
+                "reason": reason,
+                "greet_count": greet_n,
+                "end_count": end_n,
             })
             if verbose and keep is None:
                 print(f"[re-split] {seg.segment_id} ({dur/60:.1f} min): оставлен "
@@ -933,16 +996,20 @@ def segment_rows(
         prev = seg.end_index
     assert prev == total - 1
 
-    # Дополнительный прогон над «подозрительно длинными» dialog-сегментами:
+    # Дополнительный прогон над «подозрительно длинными» dialog-сегментами
+    # ИЛИ dialog-сегментами с ≥2 приветствиями (force-trigger, см. checkpoint §3.1.2):
     # ищем несколько последовательных клиентских взаимодействий внутри
     # одного блока (завершение + новое появление/новая покупка).
     # Если LLM вернёт корректный набор N>=2 тилей — заменяем сегмент,
     # иначе оставляем как есть. В любом случае инвариант покрытия сохраняется
     # (re-split использует только валидные tile-совокупности).
-    if resplit_long and llm is not None and any(
-        s.segment_type == "dialog" and s.duration_sec >= resplit_thresholds[0]
+    review_min = resplit_thresholds[0]
+    has_force_trigger = any(
+        s.segment_type == "dialog"
+        and (s.duration_sec >= review_min or _grep_for_client_marks(s.rows)[0] >= 2)
         for s in segments
-    ):
+    )
+    if resplit_long and llm is not None and has_force_trigger:
         segments, resplit_metrics = resplit_long_segments(
             segments, rows, llm,
             store_id=store_id,
