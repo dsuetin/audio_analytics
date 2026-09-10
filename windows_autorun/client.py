@@ -683,27 +683,56 @@ def _match_by_device_id(device_id):
     "Logi C310 HD WebCam"), which is then matched (substring) against the
     input devices visible to sounddevice. If the microphone is unplugged we
     return None and the caller keeps waiting for exactly this device.
+
+    Logs the full resolution chain (USB PnP id, base name, resolved index,
+    resolved endpoint name) so the log is definitive evidence that the
+    selected input belongs to the configured microphone and not to some
+    other device.
     """
     base_names = _audio_device_names_for_id(device_id)
     if not base_names:
+        logger.debug(
+            "AUDIO_DEVICE_ID=%s: no USB MEDIA PnP entity matches; "
+            "no fallback to default input, returning None",
+            device_id,
+        )
         return None
     inputs = list_input_devices()
     if not inputs:
+        logger.debug(
+            "AUDIO_DEVICE_ID=%s: no input devices visible right now; "
+            "no fallback to default input, returning None",
+            device_id,
+        )
         return None
     # Prefer an exact full-name match first, then a substring match.
     for base in base_names:
         bl = base.lower()
         for idx, dev in inputs:
             if dev.get("name", "").strip().lower() == bl:
+                logger.info(
+                    "AUDIO_DEVICE_ID=%s -> resolved index=%d "
+                    "device name=%r (match_kind=exact, pnp_id=%s)",
+                    device_id, idx, dev.get("name", "?"), base,
+                )
                 return idx
     for base in base_names:
         bl = base.lower()
         for idx, dev in inputs:
             try:
                 if bl in dev.get("name", "").lower():
+                    logger.info(
+                        "AUDIO_DEVICE_ID=%s -> resolved index=%d "
+                        "device name=%r (match_kind=substring, pnp_id=%s)",
+                        device_id, idx, dev.get("name", "?"), base,
+                    )
                     return idx
             except Exception:
                 continue
+    logger.debug(
+        "AUDIO_DEVICE_ID=%s: no input endpoint name matches any base name %s",
+        device_id, base_names,
+    )
     return None
 
 
@@ -923,6 +952,13 @@ def mic_stream(session_id, stop_event):
             )
             app_clock.touch()
 
+            if AUDIO_DEVICE_ID:
+                logger.warning(
+                    "Target microphone AUDIO_DEVICE_ID=%s is unavailable; "
+                    "client will keep polling for exactly this device "
+                    "(no fallback to default input)",
+                    AUDIO_DEVICE_ID,
+                )
             time.sleep(AUDIO_RECONNECT_DELAY)
             continue
 
@@ -931,9 +967,9 @@ def mic_stream(session_id, stop_event):
             device_name = device_info.get("name", str(device))
 
             logger.info(
-                "Opening microphone: device=%s name=%s",
-                device,
-                device_name,
+                "Configured AUDIO_DEVICE_ID=%s | Resolved device index=%s "
+                "| Resolved device name=%s",
+                AUDIO_DEVICE_ID or "<unset>", device, device_name,
             )
 
             status_writer.update(
@@ -967,10 +1003,18 @@ def mic_stream(session_id, stop_event):
                 stream.start()
 
                 logger.info(
-                    "Microphone stream started: device=%s name=%s",
+                    "Microphone stream started: "
+                    "Actually opened device index=%s name=%s",
                     device,
                     device_name,
                 )
+
+                if AUDIO_DEVICE_ID:
+                    logger.info(
+                        "Target microphone AUDIO_DEVICE_ID=%s restored "
+                        "(stream opened on index %d, name=%r)",
+                        AUDIO_DEVICE_ID, device, device_name,
+                    )
 
                 while not stop_event.is_set() and not shutdown_event.is_set():
 
