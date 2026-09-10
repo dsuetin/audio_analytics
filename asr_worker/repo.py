@@ -33,7 +33,7 @@ class TranscriptRepository:
     #     self.pool = await asyncpg.create_pool(self.dsn)
     async def start(self):
         self.pool = await asyncpg.create_pool(self.dsn)
-        print("POSTGRES POOL STARTED")
+        logger.info("POSTGRES POOL STARTED")
 
     async def save(
         self,
@@ -46,7 +46,6 @@ class TranscriptRepository:
         meta = parse_session_id(session_id)
         try:
             async with self.pool.acquire() as conn:
-                print("DB SAVE", session_id, text[:50])
                 await conn.execute(
                     """
                     INSERT INTO transcripts (

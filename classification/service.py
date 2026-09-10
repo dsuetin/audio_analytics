@@ -52,24 +52,18 @@ class ClassificationService:
 
     async def start(self):
 
-        logger.info("Init Kafka consumer...")
-        print("before consumer")
         self.consumer = AIOKafkaConsumer(
             self.in_topic,
             bootstrap_servers=self.bootstrap,
             group_id=self.group_id,
             auto_offset_reset="latest",
         )
-        print("before producer")
         self.producer = AIOKafkaProducer(
             bootstrap_servers=self.bootstrap,
         )
-        print("before consumer start")
         await self.consumer.start()
-        print("before producer start")
         await self.producer.start()
 
-        print("before db connect")
         self.db = await asyncpg.connect(
             host=os.getenv("POSTGRES_HOST", "postgres"),
             port=int(os.getenv("POSTGRES_PORT", 5432)),
@@ -92,7 +86,6 @@ class ClassificationService:
         matched_words,
         store_id,
     ):
-        print("emit", session_id, chunk_id, is_final, text, label, mode, scores)
         event = {
             "session_id": session_id,
             "store_id": store_id,
@@ -132,10 +125,9 @@ class ClassificationService:
 
         if new_session:
 
-            print("\n========== NEW CLIENT ==========\n")
             client_id = f"client_{len(store_state.clients)+1}"
             store_state.current_client_id = client_id
-            print("new client_id", client_id)
+            logger.info("NEW CLIENT store_id=%s client_id=%s", store_id, client_id)
             client_state = store_state.client(client_id)
             await self.save_client_id(session_id, client_id)
             store_state.threshold_sent = False
@@ -171,12 +163,9 @@ class ClassificationService:
         for sid in store_state.active_sessions:
             working += store_state.session(sid).partial
 
-        print("\nWORKING:")
         scores, matched_words = score(working)
-        print("session buy, ret, svc", scores)
 
         label, score_value = best_label(scores)
-        print("best label", label, score_value)
 
         logger.info(
             "session=%s scores=%s label=%s",
@@ -190,7 +179,6 @@ class ClassificationService:
             threshold_hit(scores)
             and not store_state.threshold_sent
         ):
-            print("emit", session_id, text, label, "threshold", scores)
             await self.emit(
                 session_id,
                 chunk_id,

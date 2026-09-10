@@ -52,17 +52,6 @@ def update(
 
 
 def score(histogram: Counter):
-
-    print("\n========== HISTOGRAM ==========")
-
-    for phrase, count in histogram.most_common():
-        print(
-            f"{phrase:50} {count}"
-        )
-
-    print("===============================\n")
-
-
     scores = {
         mission: 0
         for mission in MISSIONS.keys()

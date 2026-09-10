@@ -67,12 +67,8 @@ class AudioIngestionService(audio_pb2_grpc.AudioIngestionServicer):
     # START
     # ----------------------------
     async def start(self) -> None:
-        logger.info("starting_kafka")
         await self.kafka.start()
-
-        logger.info("starting_s3_worker")
         self.s3_worker_task = asyncio.create_task(self._s3_worker())
-        logger.info("starting_kafka_worker")
         self.kafka_worker_task = asyncio.create_task(self._kafka_worker())
         logger.info("service_ready")
 
@@ -115,7 +111,7 @@ class AudioIngestionService(audio_pb2_grpc.AudioIngestionServicer):
                 )
                 elapsed = time.perf_counter() - started
 
-                logger.info(
+                logger.debug(
                     "s3_upload_complete key=%s bytes=%s duration_ms=%.1f",
                     key,
                     len(body),
@@ -186,15 +182,6 @@ class AudioIngestionService(audio_pb2_grpc.AudioIngestionServicer):
             # ----------------------------
             await self.s3_queue.put((s3_key, wav_data))
 
-            logger.info(
-                "📦 queued_s3_upload "
-                "session_id=%s chunk_id=%s bytes=%s",
-                session_id,
-                chunk_id,
-                len(chunk.audio),
-            )
-
-            kafka_started = time.perf_counter()
             event = Event(
                 type="audio_chunk_saved",
                 session_id=session_id,
@@ -206,23 +193,14 @@ class AudioIngestionService(audio_pb2_grpc.AudioIngestionServicer):
                     "is_end": chunk.is_end,
                 },
             )
-            logger.info(
-                "📦 created_kafka_event "
-                "session_id=%s chunk_id=%s is_end=%s duration_ms=%.3f",
+            logger.debug(
+                "chunk_enqueued session_id=%s chunk_id=%s bytes=%s is_end=%s",
                 session_id,
                 chunk_id,
+                len(chunk.audio),
                 chunk.is_end,
-                (time.perf_counter() - kafka_started)*1000,
             )
             await self.kafka_queue.put(event)
-
-            logger.info(
-                "📦 sending_kafka_event "
-                "session_id=%s chunk_id=%s duration_ms=%.3f",
-                session_id,
-                chunk_id,
-            (time.perf_counter() - kafka_started)*1000,
-            )
 
             if chunk.is_end:
                 self.session_chunks.pop(session_id, None)

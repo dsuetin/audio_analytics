@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from collections import defaultdict
 
 import numpy as np
@@ -6,6 +7,8 @@ import tritonclient.grpc.aio as grpcclient
 from tritonclient.utils import np_to_triton_dtype
 
 from asr_worker.proto.output_pb2 import SpeechRecognitionHypothesis
+
+logger = logging.getLogger(__name__)
 
 
 # ONLINE_MODEL = "emformer_conformer_online_tdt_punct_microphone_v1"
@@ -61,7 +64,6 @@ class TritonASRClient:
         while True:
             item = await queue.get()
             pcm, is_last = item
-            # print(f"[{session_id}] Got chunk from queue, is_last={is_last}, bytes={len(pcm)}")
             yield {
                 "model_name": ONLINE_MODEL if not is_last else FINAL_MODEL,
                 "inputs": [self._make_input(pcm)],
@@ -98,16 +100,12 @@ class TritonASRClient:
     # response consumer
     # ----------------------------
     async def _consume(self, session_id: str, stream):
-        # print("CONSUME STARTED", session_id)
         try:
             chunk_id = 0
             async for response, error in stream:
-                # print("GOT RESPONSE")
                 if error:
-                    print("stream error:", error)
+                    logger.debug("stream error session=%s: %s", session_id, error)
                     continue
-                # print("response22222", response)
-                # print(response._result)
 
                 params = response._result.parameters
 
@@ -117,15 +115,11 @@ class TritonASRClient:
                     is_final = False
                 chunk_id += 1
                 raw = response.as_numpy("SpeechRecognitionHypothesis")
-                # print(f"[{session_id}] RAW RESPONSE:", raw)
                 if raw is None:
-                    # print(f"[{session_id}] EMPTY RAW")
                     continue
 
                 payload = raw.item() if raw.shape == () else raw[0]
-                # print(f"[{session_id}] PAYLOAD:", payload)
                 if not payload:
-                    # print(f"[{session_id}] EMPTY PAYLOAD")
                     continue
 
                 hyp = SpeechRecognitionHypothesis()
@@ -134,8 +128,6 @@ class TritonASRClient:
                 text = hyp.normalized_transcript or hyp.transcript
                 self.latest_text[session_id] = text
 
-                # print(f"[{session_id}] ASR:", text)
-                # print(f"[{session_id}] ASR chunk_id={chunk_id}, is_final={is_final}, text={text}")
                 await self.asr_events.put(
                     {
                         "session_id": session_id,
@@ -145,8 +137,7 @@ class TritonASRClient:
                     }
                 )
         except Exception:
-            import traceback
-            traceback.print_exc()
+            logger.exception("ASR stream consume failed session=%s", session_id)
 
 
 

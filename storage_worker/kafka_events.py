@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-from asyncio.log import logger
+import logging
 from aiokafka import AIOKafkaProducer
 
 from storage_worker.events import Event
+
+logger = logging.getLogger(__name__)
 
 
 class KafkaEventProducer:
@@ -20,9 +22,8 @@ class KafkaEventProducer:
             retry_backoff_ms=500,
             metadata_max_age_ms=5000,
         )
-        print("🔥 Kafka producer starting...")
         await self._producer.start()
-        print("✅ Kafka producer started")
+        logger.info("Kafka producer started")
 
     async def stop(self) -> None:
         if self._producer is not None:
@@ -32,7 +33,6 @@ class KafkaEventProducer:
     async def send(self, event: Event) -> None:
         if self._producer is None:
             raise RuntimeError("Kafka producer is not started")
-        # await self._producer.send_and_wait(self.topic, event.to_json_bytes())
         try:
             await self._producer.send_and_wait(
                 self.topic,
@@ -40,4 +40,4 @@ class KafkaEventProducer:
                 key=event.session_id.encode(),
             )
         except Exception:
-            logger.exeption("Failed to publish event")
+            logger.exception("Failed to publish event")

@@ -78,7 +78,6 @@ class ASRWorker:
         while True:
 
             event = await self.asr_events.get()
-            # print("Processing ASR event:", event)
 
             try:
                 meta = parse_session_id(event["session_id"])
@@ -135,7 +134,7 @@ class ASRWorker:
 
         elapsed_ms = (time.perf_counter() - started) * 1000
 
-        logger.info(
+        logger.debug(
             "s3_read session=%s chunk=%s is_end=%s bytes=%s time_ms=%.2f",
             session_id,
             chunk_id,
@@ -148,16 +147,10 @@ class ASRWorker:
     # session scheduler
     # ----------------------------
     def _schedule_session(self, session_id: str):
-        logger.info(
-            "schedule session=%s existing_task=%s",
-            session_id,
-            self.session_tasks.get(session_id),
-        )
-
         task = self.session_tasks.get(session_id)
 
         if task is None or task.done():
-            logger.info("create task session=%s", session_id)
+            logger.debug("create task session=%s", session_id)
             task = asyncio.create_task(self.process_session(session_id))
             self.session_tasks[session_id] = task
 
@@ -175,7 +168,6 @@ class ASRWorker:
 
                 if await self.buffer.is_end_ready(session_id):
 
-                    # print("final!!!!!!!!!!!!!")
                     final = await self.buffer.pop_all(session_id)
 
                     logger.info(
@@ -202,7 +194,6 @@ class ASRWorker:
                     self.session_locks.pop(session_id, None)
 
                     logger.info("session closed session=%s", session_id)
-            
 
                 chunk = await self.buffer.pop_if_ready(
                     session_id,
@@ -213,7 +204,7 @@ class ASRWorker:
                 if chunk is None:
                     break
 
-                logger.info(
+                logger.debug(
                     "ASR stream session=%s bytes=%s",
                     session_id,
                     len(chunk),
@@ -224,9 +215,6 @@ class ASRWorker:
                     chunk,
                     is_last=False,
                 )
-
-                
-
 
 
 async def main():
