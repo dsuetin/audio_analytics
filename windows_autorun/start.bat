@@ -1,273 +1,521 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
-rem ================================================================
-rem  start.bat - Audio Analytics installer & launcher
-rem
-rem  Steps:
-rem    1. Create .env (if missing);
-rem    2. Find/install Python 3.11, create .venv, install deps;
-rem    3. List audio devices (so user can set AUDIO_DEVICE_ID);
-rem    4. Register autostart in Windows Registry;
-rem    5. Launch client and GUI.
-rem
-rem  Usage:
-rem    start.bat              install + launch (with pause)
-rem    start.bat /UNATTENDED  install + launch (no pause)
-rem ================================================================
 
-set "_PAUSE=1"
-for %%A in (%*) do if /i "%%A"=="/UNATTENDED" set "_PAUSE=0"
+title Audio Analytics - Installation
+
+echo ==========================================================
+echo Audio Analytics - Installation
+echo ==========================================================
+echo.
+
+REM ==========================================================
+REM CONFIG
+REM ==========================================================
 
 set "INSTALL_DIR=%~dp0"
 if "%INSTALL_DIR:~-1%"=="\" set "INSTALL_DIR=%INSTALL_DIR:~0,-1%"
 
-echo.
-echo  ==========================================================
-echo    Audio Analytics - Installation
-echo  ==========================================================
-echo.
-echo  Install directory: %INSTALL_DIR%
-echo  Required Python: 3.11 (x64)
-echo.
+set "PYTHON_VERSION=3.11"
+set "PYTHON_INSTALLER_VERSION=3.11.9"
+set "PYTHON_EXE=%ProgramFiles%\Python311\python.exe"
+set "PYTHON_INSTALLER=%TEMP%\python-3.11.9-amd64.exe"
 
-rem ----------------------------------------------------------------
-rem  Step 1 - .env
-rem ----------------------------------------------------------------
-if not exist "%INSTALL_DIR%\.env" goto env_missing
-echo  [1/6] .env exists - skipping.
-goto env_done
-
-:env_missing
-if not exist "%INSTALL_DIR%\.env.example" goto env_none
-copy /Y "%INSTALL_DIR%\.env.example" "%INSTALL_DIR%\.env" >nul
-echo  [1/6] Created .env from .env.example.
-echo        Edit .env to set SERVER_IP, STORE_ID, WORKER_NAME
-echo        and, if needed, AUDIO_DEVICE_ID.
-type "%INSTALL_DIR%\.env"
-goto env_done
-
-:env_none
-echo  [1/6] Error: no .env and no .env.example!
-echo        Create .env file in %INSTALL_DIR%.
-goto :fail
-
-:env_done
+echo Install directory: %INSTALL_DIR%
+echo Required Python: 3.11 (x64)
 echo.
 
-rem ----------------------------------------------------------------
-rem  Step 2 - Find Python 3.11
-rem ----------------------------------------------------------------
-set "PY_BIN="
+REM ==========================================================
+REM [0/6] ADMIN CHECK
+REM ==========================================================
 
-rem  A) py launcher with version 3.11.
-py -3.11 -c "import sys;print(sys.executable)" >"%TEMP%\aa_py.txt" 2>nul
-if not errorlevel 1 set /p PY_BIN=<"%TEMP%\aa_py.txt"
+echo [0/6] Checking administrator privileges...
 
-rem  B) python3.11 on PATH.
-if not defined PY_BIN (
-    for /f "delims=" %%P in ('python3.11 -c "import sys;print(sys.executable)" 2^>nul') do set "PY_BIN=%%P"
+net session >nul 2>&1
+if errorlevel 1 (
+    echo.
+    echo [ERROR] This installer must be run as Administrator.
+    echo.
+    echo Right-click start.bat and select:
+    echo "Run as administrator"
+    echo.
+    pause
+    exit /b 1
 )
 
-rem  C) python on PATH, must be 3.11.
-if not defined PY_BIN (
-    for /f "delims=" %%P in ('python -c "import sys;print(sys.executable)" 2^>nul') do set "PY_BIN=%%P"
-)
-
-rem  Verify version is 3.11.
-if defined PY_BIN (
-    "%PY_BIN%" -c "import sys;raise SystemExit(0 if sys.version_info[:2]==(3,11) else 1)" >nul 2>&1
-    if errorlevel 1 set "PY_BIN="
-)
-
-if not defined PY_BIN goto install_py311
-
-echo  [2/6] Found Python 3.11: %PY_BIN%
-for /f "delims=" %%V in ('"%PY_BIN%" --version 2^>nul') do echo        %%V
+echo        Administrator privileges: OK
 echo.
-goto venv_check
 
-rem ----------------------------------------------------------------
-rem  Python 3.11 not found - auto-install
-rem ----------------------------------------------------------------
-:install_py311
-echo  [2/6] Python 3.11 not found. Downloading and installing...
-set "PY_URL=https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe"
-set "PY_INSTALLER=%TEMP%\python-3.11.9-amd64.exe"
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$ProgressPreference='SilentlyContinue'; Invoke-WebRequest -UseBasicParsing -Uri '%PY_URL%' -OutFile '%PY_INSTALLER%'"
-if errorlevel 1 goto py_download_fail
-echo        Running installer (silent, may take a few minutes)...
-"%PY_INSTALLER%" /quiet InstallAllUsers=0 PrependPath=1 Include_test=0 Include_launcher=1 Include_pip=1 Include_doc=1 Include_tcltk=1 Include_dev=1 Include_exe=1 Shortcuts=0
-if errorlevel 1 goto py_install_fail
+REM ==========================================================
+REM [1/6] ENVIRONMENT
+REM ==========================================================
 
-set "PY_BIN="
-py -3.11 -c "import sys;print(sys.executable)" >"%TEMP%\aa_py.txt" 2>nul
-if not errorlevel 1 set /p PY_BIN=<"%TEMP%\aa_py.txt"
-if not defined PY_BIN if exist "%LOCALAPPDATA%\Programs\Python\Python311\python.exe" set "PY_BIN=%LOCALAPPDATA%\Programs\Python\Python311\python.exe"
-if not defined PY_BIN if exist "%ProgramFiles%\Python311\python.exe" set "PY_BIN=%ProgramFiles%\Python311\python.exe"
+echo [1/6] Checking .env...
 
-if defined PY_BIN (
-    "%PY_BIN%" -c "import sys;raise SystemExit(0 if sys.version_info[:2]==(3,11) else 1)" >nul 2>&1
-    if errorlevel 1 set "PY_BIN="
+if exist "%INSTALL_DIR%\.env" (
+    echo        .env found.
+) else (
+    if exist "%INSTALL_DIR%\.env.example" (
+        echo        [WARNING] .env not found.
+        echo        Please create .env from .env.example before running.
+    ) else (
+        echo        [WARNING] .env.example not found.
+        echo        Continuing...
+    )
 )
 
-if not defined PY_BIN goto py_install_fail
-
-echo        Python 3.11 installed: %PY_BIN%
-for /f "delims=" %%V in ('"%PY_BIN%" --version 2^>nul') do echo        %%V
 echo.
-goto venv_check
 
-:py_download_fail
-echo  [2/6] Error: failed to download Python 3.11 installer.
-echo        Check internet connection.
-goto :fail
+REM ==========================================================
+REM [2/6] PYTHON 3.11
+REM ==========================================================
 
-:py_install_fail
-echo  [2/6] Error: Python 3.11 installation failed.
-echo        Install manually from https://www.python.org/downloads/
-echo        (enable "py launcher" and "Add python.exe to PATH")
-echo        then re-run start.bat.
-goto :fail
+echo [2/6] Checking Python 3.11...
 
-rem ----------------------------------------------------------------
-rem  Step 2b - .venv
-rem ----------------------------------------------------------------
-:venv_check
-if not exist "%INSTALL_DIR%\.venv\Scripts\python.exe" goto create_venv
-if not exist "%INSTALL_DIR%\.venv\Scripts\pythonw.exe" goto create_venv
+set "PYTHON_OK="
 
-"%INSTALL_DIR%\.venv\Scripts\python.exe" -c "import sys;raise SystemExit(0 if sys.version_info[:2]==(3,11) else 1)" >nul 2>&1
+REM ----------------------------------------------------------
+REM First: check the expected official all-users installation
+REM ----------------------------------------------------------
+
+if exist "%PYTHON_EXE%" (
+    echo        Found:
+    echo        %PYTHON_EXE%
+
+    "%PYTHON_EXE%" -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3,11) else 1)" >nul 2>&1
+
+    if not errorlevel 1 (
+        set "PYTHON_OK=1"
+        echo        Python 3.11: OK
+        goto python_found
+    )
+
+    echo        [WARNING] This Python is NOT version 3.11.
+    echo        Required Python 3.11 will be installed.
+)
+
+REM ----------------------------------------------------------
+REM Try Python launcher, but only accept Python 3.11
+REM ----------------------------------------------------------
+
+where py >nul 2>&1
 if not errorlevel 1 (
-    echo  [2/6] .venv exists and works with Python 3.11 - reusing.
-    goto venv_install_deps
+    py -3.11 -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3,11) else 1)" >nul 2>&1
+
+    if not errorlevel 1 (
+        for /f "delims=" %%P in ('py -3.11 -c "import sys; print(sys.executable)" 2^>nul') do (
+            set "PYTHON_EXE=%%P"
+        )
+
+        if defined PYTHON_EXE (
+            if exist "!PYTHON_EXE!" (
+                set "PYTHON_OK=1"
+                echo        Python 3.11 found via Python Launcher:
+                echo        !PYTHON_EXE!
+                goto python_found
+            )
+        )
+    )
 )
 
-echo  [2/6] .venv was created with wrong Python - recreating...
-rmdir /S /Q "%INSTALL_DIR%\.venv" >nul 2>&1
+REM ----------------------------------------------------------
+REM Try python.exe from PATH, but ONLY if it is really 3.11
+REM ----------------------------------------------------------
 
-:create_venv
-if not exist "%INSTALL_DIR%\requirements.txt" goto venv_no_req
-echo  [2/6] Creating virtual environment .venv (Python 3.11)...
-"%PY_BIN%" -m venv "%INSTALL_DIR%\.venv"
-if errorlevel 1 goto venv_fail
-echo        .venv created.
-
-rem ----------------------------------------------------------------
-rem  Step 2c - Dependencies
-rem ----------------------------------------------------------------
-:venv_install_deps
-echo  [2/6] Checking dependencies in .venv...
-"%INSTALL_DIR%\.venv\Scripts\python.exe" -c "import grpc, numpy, sounddevice, aiokafka, dotenv, google.protobuf" >nul 2>&1
+where python >nul 2>&1
 if not errorlevel 1 (
-    echo        Dependencies already installed - skipping pip.
-    goto venv_done
+    python -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3,11) else 1)" >nul 2>&1
+
+    if not errorlevel 1 (
+        for /f "delims=" %%P in ('python -c "import sys; print(sys.executable)" 2^>nul') do (
+            set "PYTHON_EXE=%%P"
+        )
+
+        if defined PYTHON_EXE (
+            if exist "!PYTHON_EXE!" (
+                set "PYTHON_OK=1"
+                echo        Python 3.11 found in PATH:
+                echo        !PYTHON_EXE!
+                goto python_found
+            )
+        )
+    )
 )
-echo  [2/6] Installing dependencies from requirements.txt...
-"%INSTALL_DIR%\.venv\Scripts\python.exe" -m pip install --upgrade pip >nul 2>&1
-"%INSTALL_DIR%\.venv\Scripts\python.exe" -m pip install -r "%INSTALL_DIR%\requirements.txt"
-if errorlevel 1 goto venv_pip_fail
-echo        Dependencies installed.
-goto venv_done
 
-:venv_no_req
-echo  [2/6] Error: requirements.txt not found.
-goto :fail
+REM ==========================================================
+REM Python 3.11 is missing or wrong version
+REM Install official Python 3.11.9 x64
+REM ==========================================================
 
-:venv_fail
-echo  [2/6] Error: failed to create .venv.
-echo        Check Python 3.11 installation and py launcher.
-goto :fail
+:install_python
 
-:venv_pip_fail
-echo  [2/6] Error: failed to install dependencies.
-echo        Check internet connection and try again.
-goto :fail
-
-:venv_done
-
-rem ----------------------------------------------------------------
-rem  Step 3 - List audio devices
-rem ----------------------------------------------------------------
 echo.
-echo  [3/6] Available audio devices:
-echo  ----------------------------------------------------------
-"%INSTALL_DIR%\.venv\Scripts\python.exe" "%INSTALL_DIR%\list_devices.py"
-echo  ----------------------------------------------------------
-echo.
-echo  If you want to use a specific external USB microphone,
-echo  edit .env and set AUDIO_DEVICE_ID with the hardware id above.
-echo  Press any key to continue...
-pause >nul
+echo        Python 3.11 is missing or the installed version is wrong.
+echo        Installing Python %PYTHON_INSTALLER_VERSION% x64...
 echo.
 
-rem ----------------------------------------------------------------
-rem  Step 4 - Register autostart in Registry
-rem ----------------------------------------------------------------
-echo  [4/6] Registering autostart in Registry (VBS launchers)...
-if not exist "%INSTALL_DIR%\autostart_client.vbs" goto reg_novbs
-if not exist "%INSTALL_DIR%\autostart_gui.vbs" goto reg_novbs
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$vbs1='wscript.exe \"%INSTALL_DIR%\autostart_client.vbs\"'; $vbs2='wscript.exe \"%INSTALL_DIR%\autostart_gui.vbs\"'; New-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'AudioAnalyticsClient' -PropertyType String -Value $vbs1 -Force | Out-Null; New-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'AudioAnalyticsGUI' -PropertyType String -Value $vbs2 -Force | Out-Null"
-if errorlevel 1 goto reg_fail
-echo        Done: autostart registered for current user.
-goto reg_done
+if exist "%PYTHON_INSTALLER%" (
+    del /f /q "%PYTHON_INSTALLER%" >nul 2>&1
+)
 
-:reg_fail
-echo  [4/6] Error: failed to write to Registry.
-goto :fail
+echo        Downloading Python installer...
 
-:reg_novbs
-echo  [4/6] Error: launcher files autostart_client.vbs /
-echo        autostart_gui.vbs not found in %INSTALL_DIR%.
-goto :fail
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
+    "$ProgressPreference='SilentlyContinue'; " ^
+    "Invoke-WebRequest -Uri 'https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe' -OutFile '%PYTHON_INSTALLER%'"
 
-:reg_done
+if errorlevel 1 (
+    echo.
+    echo [ERROR] Failed to download Python 3.11.9.
+    echo.
+    pause
+    exit /b 1
+)
 
-rem ----------------------------------------------------------------
-rem  Step 5 - Launch client and GUI
-rem ----------------------------------------------------------------
-if not exist "%INSTALL_DIR%\autostart_client.vbs" goto launch_novbs
-if not exist "%INSTALL_DIR%\autostart_gui.vbs" goto launch_novbs
-echo  [5/6] Launching client and GUI...
+if not exist "%PYTHON_INSTALLER%" (
+    echo.
+    echo [ERROR] Python installer was not downloaded.
+    echo.
+    pause
+    exit /b 1
+)
+
+echo        Installing Python 3.11.9 for all users...
+
+"%PYTHON_INSTALLER%" /quiet InstallAllUsers=1 ^
+    PrependPath=1 ^
+    Include_test=0 ^
+    Include_launcher=1 ^
+    Include_pip=1 ^
+    Include_doc=0 ^
+    Include_tcltk=1 ^
+    Include_dev=1 ^
+    Include_exe=1 ^
+    Shortcuts=0
+
+if errorlevel 1 (
+    echo.
+    echo [ERROR] Python installation failed.
+    echo.
+    pause
+    exit /b 1
+)
+
+echo        Python installer finished.
+
+REM ----------------------------------------------------------
+REM Verify the expected installation
+REM ----------------------------------------------------------
+
+set "PYTHON_EXE=%ProgramFiles%\Python311\python.exe"
+
+if not exist "%PYTHON_EXE%" (
+    echo.
+    echo [ERROR] Python 3.11 executable was not found after installation:
+    echo        %PYTHON_EXE%
+    echo.
+    pause
+    exit /b 1
+)
+
+"%PYTHON_EXE%" -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3,11) else 1)" >nul 2>&1
+
+if errorlevel 1 (
+    echo.
+    echo [ERROR] Installed Python is still not Python 3.11.
+    echo.
+    echo Detected executable:
+    echo %PYTHON_EXE%
+    echo.
+    pause
+    exit /b 1
+)
+
+echo        Python 3.11 installation verified.
+echo.
+
+:python_found
+
+echo.
+echo        Using Python:
+echo        %PYTHON_EXE%
+
+for /f "delims=" %%V in ('"%PYTHON_EXE%" -c "import sys; print(sys.version)" 2^>nul') do (
+    set "PY_VERSION_FULL=%%V"
+)
+
+echo        Version:
+echo        !PY_VERSION_FULL!
+echo.
+
+REM ==========================================================
+REM [3/6] VIRTUAL ENVIRONMENT
+REM ==========================================================
+
+echo [3/6] Creating virtual environment...
+
+if exist "%INSTALL_DIR%\.venv" (
+    echo        Existing .venv found.
+    echo        Checking its Python version...
+
+    if exist "%INSTALL_DIR%\.venv\Scripts\python.exe" (
+        "%INSTALL_DIR%\.venv\Scripts\python.exe" -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3,11) else 1)" >nul 2>&1
+
+        if not errorlevel 1 (
+            echo        Existing .venv uses Python 3.11.
+            goto venv_ready
+        )
+
+        echo        Existing .venv uses another Python version.
+        echo        Recreating .venv...
+    )
+
+    rmdir /s /q "%INSTALL_DIR%\.venv"
+)
+
+"%PYTHON_EXE%" -m venv "%INSTALL_DIR%\.venv"
+
+if errorlevel 1 (
+    echo.
+    echo [ERROR] Failed to create virtual environment.
+    echo.
+    pause
+    exit /b 1
+)
+
+:venv_ready
+
+set "VENV_PYTHON=%INSTALL_DIR%\.venv\Scripts\python.exe"
+set "VENV_PYTHONW=%INSTALL_DIR%\.venv\Scripts\pythonw.exe"
+
+if not exist "%VENV_PYTHON%" (
+    echo.
+    echo [ERROR] Virtual environment Python not found:
+    echo        %VENV_PYTHON%
+    echo.
+    pause
+    exit /b 1
+)
+
+if not exist "%VENV_PYTHONW%" (
+    echo.
+    echo [ERROR] Virtual environment pythonw.exe not found:
+    echo        %VENV_PYTHONW%
+    echo.
+    pause
+    exit /b 1
+)
+
+"%VENV_PYTHON%" -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3,11) else 1)" >nul 2>&1
+
+if errorlevel 1 (
+    echo.
+    echo [ERROR] Virtual environment is not using Python 3.11.
+    echo.
+    pause
+    exit /b 1
+)
+
+echo        .venv Python 3.11: OK
+echo.
+
+REM ==========================================================
+REM [4/6] DEPENDENCIES
+REM ==========================================================
+
+echo [4/6] Installing Python dependencies...
+
+if exist "%INSTALL_DIR%\requirements.txt" (
+    "%VENV_PYTHON%" -m pip install --upgrade pip
+    if errorlevel 1 (
+        echo.
+        echo [ERROR] Failed to upgrade pip.
+        echo.
+        pause
+        exit /b 1
+    )
+
+    "%VENV_PYTHON%" -m pip install -r "%INSTALL_DIR%\requirements.txt"
+    if errorlevel 1 (
+        echo.
+        echo [ERROR] Failed to install Python dependencies.
+        echo.
+        pause
+        exit /b 1
+    )
+) else (
+    echo        [WARNING] requirements.txt not found.
+    echo        Skipping dependency installation.
+)
+
+echo.
+echo        Dependencies: OK
+echo.
+
+REM ==========================================================
+REM [5/6] AUDIO DEVICE CHECK
+REM ==========================================================
+
+echo [5/6] Checking audio device...
+
+if exist "%INSTALL_DIR%\list_devices.py" (
+    "%VENV_PYTHON%" "%INSTALL_DIR%\list_devices.py"
+
+    if errorlevel 1 (
+        echo.
+        echo [WARNING] Audio device check returned an error.
+        echo        Installation will continue.
+    )
+) else (
+    echo        [WARNING] list_devices.py not found.
+    echo        Skipping audio device check.
+)
+
+echo.
+
+REM ==========================================================
+REM [6/6] AUTOSTART
+REM ==========================================================
+
+echo [6/6] Configuring Windows autostart...
+
+REM ----------------------------------------------------------
+REM Give normal Windows users access to application directory.
+REM ----------------------------------------------------------
+
+icacls "%INSTALL_DIR%" /grant "Users:(OI)(CI)M" /T /C >nul 2>&1
+
+REM ----------------------------------------------------------
+REM IMPORTANT:
+REM HKLM Run executes at logon for every interactive user.
+REM This is needed because installation is performed by Admin,
+REM while the seller logs in using another Windows account.
+REM ----------------------------------------------------------
+
+if not exist "%INSTALL_DIR%\autostart_client.vbs" (
+    echo [ERROR] autostart_client.vbs not found.
+    echo.
+    pause
+    exit /b 1
+)
+
+if not exist "%INSTALL_DIR%\autostart_gui.vbs" (
+    echo [ERROR] autostart_gui.vbs not found.
+    echo.
+    pause
+    exit /b 1
+)
+
+REM Remove old per-user autostart entries.
+reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" ^
+    /v "AudioAnalyticsClient" /f >nul 2>&1
+
+reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" ^
+    /v "AudioAnalyticsGUI" /f >nul 2>&1
+
+REM Remove old machine entries first.
+reg delete "HKLM\Software\Microsoft\Windows\CurrentVersion\Run" ^
+    /v "AudioAnalyticsClient" /f >nul 2>&1
+
+reg delete "HKLM\Software\Microsoft\Windows\CurrentVersion\Run" ^
+    /v "AudioAnalyticsGUI" /f >nul 2>&1
+
+REM ----------------------------------------------------------
+REM Use cmd /c with a fully quoted command.
+REM ----------------------------------------------------------
+
+reg add "HKLM\Software\Microsoft\Windows\CurrentVersion\Run" ^
+    /v "AudioAnalyticsClient" ^
+    /t REG_SZ ^
+    /d "wscript.exe \"%INSTALL_DIR%\autostart_client.vbs\"" ^
+    /f >nul
+
+if errorlevel 1 (
+    echo [ERROR] Failed to register AudioAnalyticsClient autostart.
+    echo.
+    pause
+    exit /b 1
+)
+
+reg add "HKLM\Software\Microsoft\Windows\CurrentVersion\Run" ^
+    /v "AudioAnalyticsGUI" ^
+    /t REG_SZ ^
+    /d "wscript.exe \"%INSTALL_DIR%\autostart_gui.vbs\"" ^
+    /f >nul
+
+if errorlevel 1 (
+    echo [ERROR] Failed to register AudioAnalyticsGUI autostart.
+    echo.
+    pause
+    exit /b 1
+)
+
+echo        Machine-wide autostart: OK
+echo.
+
+REM ==========================================================
+REM Verify registry
+REM ==========================================================
+
+echo        Registered startup entries:
+
+reg query "HKLM\Software\Microsoft\Windows\CurrentVersion\Run" ^
+    /v "AudioAnalyticsClient"
+
+reg query "HKLM\Software\Microsoft\Windows\CurrentVersion\Run" ^
+    /v "AudioAnalyticsGUI"
+
+echo.
+
+REM ==========================================================
+REM FINISH
+REM ==========================================================
+
+echo ==========================================================
+echo Installation completed successfully.
+echo ==========================================================
+echo.
+echo Install directory:
+echo   %INSTALL_DIR%
+echo.
+echo Python:
+echo   %PYTHON_EXE%
+echo.
+echo Virtual environment:
+echo   %INSTALL_DIR%\.venv
+echo.
+echo Application Python:
+echo   %VENV_PYTHON%
+echo.
+echo GUI Python:
+echo   %VENV_PYTHONW%
+echo.
+echo Autostart:
+echo   HKLM\Software\Microsoft\Windows\CurrentVersion\Run
+echo.
+echo IMPORTANT:
+echo   The client and GUI will start automatically when a
+echo   Windows user logs in.
+echo.
+echo   Installation was performed as Administrator, but the
+echo   application itself will run as the logged-in user.
+echo.
+echo ==========================================================
+echo.
+
+REM ==========================================================
+REM Start immediately for the CURRENT user.
+REM This is only for convenience after installation.
+REM The normal seller autostart happens on next user logon.
+REM ==========================================================
+
+echo Starting Audio Analytics for the current user...
+echo.
+
 start "" wscript.exe "%INSTALL_DIR%\autostart_client.vbs"
 start "" wscript.exe "%INSTALL_DIR%\autostart_gui.vbs"
-echo        Done. Audio Analytics will start automatically on Windows login.
 
-rem ----------------------------------------------------------------
-rem  Step 6 - Summary
-rem ----------------------------------------------------------------
 echo.
-echo  ==========================================================
-echo    Installation complete.
-echo    Service runs via Python 3.11 in .venv.
-echo    Check:  tasklist /FI "IMAGENAME eq pythonw.exe"
-echo  ==========================================================
+echo Done.
 echo.
-echo  Client start requested (hidden). Watch the log:
-echo    powershell -NoProfile -Command "Get-Content '%INSTALL_DIR%\logs\client.log' -Wait -Tail 20"
-echo  Live status (mic/grpc/kafka/purchases) is shown in the GUI via shared memory
-echo.
-if "%_PAUSE%"=="1" (
-    echo  Press any key to close...
-    pause >nul
-)
+pause
 exit /b 0
-
-:launch_novbs
-echo  [5/6] Error: launcher files autostart_client.vbs /
-echo        autostart_gui.vbs not found in %INSTALL_DIR%.
-goto :fail
-
-:fail
-echo.
-echo  **************************************************************
-echo    Installation failed. Fix the error above and re-run
-echo    start.bat.
-echo  **************************************************************
-echo.
-if "%_PAUSE%"=="1" (
-    echo  Press any key to close...
-    pause >nul
-)
-exit /b 1
