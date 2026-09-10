@@ -18,6 +18,47 @@ from .metadata import parse_session_metadata
 logger = logging.getLogger(__name__)
 
 
+class KafkaNotReadyError(RuntimeError):
+    pass
+
+
+async def wait_for_kafka(
+    host: str,
+    port: int,
+    timeout_sec: int = 120,
+    probe_timeout_sec: float = 2.0,
+) -> None:
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + timeout_sec
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            _reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port),
+                timeout=probe_timeout_sec,
+            )
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+            logger.info(
+                "Kafka %s:%s reachable (attempt %s)", host, port, attempt,
+            )
+            return
+        except (OSError, asyncio.TimeoutError) as exc:
+            if loop.time() >= deadline:
+                raise KafkaNotReadyError(
+                    f"Kafka unreachable at {host}:{port} after {timeout_sec}s ({exc})"
+                ) from exc
+            logger.info(
+                "Kafka %s:%s not ready (attempt %s, remaining %ss)",
+                host, port, attempt, int(deadline - loop.time()),
+            )
+            await asyncio.sleep(1)
+
+
 class ClassificationService:
 
     def __init__(self):
@@ -51,6 +92,11 @@ class ClassificationService:
         self.state = StateManager()
 
     async def start(self):
+
+        first_bootstrap = (self.bootstrap or "").split(",")[0].strip()
+        b_host, b_port = first_bootstrap.rsplit(":", 1)
+
+        await wait_for_kafka(b_host, int(b_port))
 
         self.consumer = AIOKafkaConsumer(
             self.in_topic,
@@ -266,6 +312,10 @@ class ClassificationService:
 
     
 def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
     service = ClassificationService()
     asyncio.run(service.run())
 
