@@ -40,8 +40,23 @@
 
 - [ ] **Корректные границы + `dialog_type`/`mission`** (не путать service/help/corporate с buy),
   **отсутствие лишних customer dialogs** (лишние повышают false-positive buy).
-- [ ] **GT для проверки качества segmentation**(не только classification): на доступных GT
-  оценить не только is_sale, но и «правильно ли выделена миссия / не объединены ли клиенты».
+- [x] **GT для проверки качества segmentation (09-03) — DONE.** Segmentation-only
+  iterations на **clean GT**: best = iter_01 (CORRECT=8, SPLIT=9, MERGED=2, PARTIAL=9,
+  MISSED=4=noise, EXTRA=22). Взяты обе стороны: «не объединены ли клиенты» (MERGED=2)
+  и «правильны ли границы» (CORRECT/PARTIAL). См. `regression_0903/ITERATIONS_0903.md` +
+  `compare_clean_gt.csv`.
+- [x] **Переаннотировать перекрывающиеся GT-окна 2026-09-03 — DONE (2026-09-12).**
+  Построена clean GT: `regression_0903/gt_clean_2026-09-03_v1.xlsx` = **40 миссий, 0 пересечений**
+  (91→40; слито 14 дублей, не-клиентские точки → noise). Аудит: реальных покупок не потеряно.
+  **Ключевой вывод:** на чистой GT «SPLIT/MERGED»-проблема исчезает (iter_01: SPLIT=9,
+  MERGED=2, CORRECT=8, EXTRA=22, MISSED=4) — старые SPLIT=11/MERGED=23 были ARTEFAKTOM
+  перекрывающихся GT-окон, а не дефектом AI. 4 MISSED = un-audible/employee → noise floor.
+  → Больше НЕ гонять SPLIT/MERGED. Итог: `regression_0903/ITERATIONS_0903.md` +
+  `compare_clean_gt.csv`.
+- [ ] **Сегментация: снижение EXTRA (ложные клиентские диалоги)** — НОВАЯ цель на clean GT.
+  Реальный оставшийся дефект precision: модель выдаёт dialog там, где noise/employee.
+  Диагностика: строки `EXTRA` в `regression_0903/iter01_vs_cleanGT_table.csv` → сверить текст
+  → точечное (НЕ blind) изменение только при найденных паттернах.
 - [ ] **Сегментация: деградация (пустой LLM-ответ → одиночные `unknown`)** — 08-25: 883,
   08-27: 1116, 08-28: 2374. Покрытие строк полное, структура нет. Надёжный retry/fallback,
   диагностика почему LLM молчит на этих чанах (влияет и на recall покупок).
@@ -65,6 +80,11 @@
 
 ## DONE (история, не активные)
 
+- [x] **Итерации сегментации 2026-09-03 (segmentation-only):** root-cause по SPLIT
+  (`regression_0903/split_analysis_iter01.*`, `overlap_check.py`), две попытки фикса —
+  **iter_04** (prompt SPLIT-protection, REGRESSED → reverted) и **iter_04b** (merge-only
+  boundary review, SPLIT 11→24 но MISSED 23→14). Итог: **iter_01 = лучший baseline**;
+  SPLIT≈11 отчасти лимит GT-качества. Детали: `regression_0903/ITERATIONS_0903.md`.
 - [x] **Session 2026-09-04**: полный backfill всех 13 дат через `run.py` (LLM 27b), валидация
   **ALL FINAL VALID + ALL PDF VALID** (coverage 100%, unassigned=0, dup=0, llm_errors=0 по всем),
   бэкап старых finals в `/tmp/opencode/final_backup_20260904_161738/`. Разбор самых длинных

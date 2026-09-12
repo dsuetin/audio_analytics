@@ -85,8 +85,8 @@ class BigBudgetLLM:
     """
 
     def __init__(self, model: str | None = None, min_ctx: int = PIPELINE_NUM_CTX,
-                 min_predict: int = PIPELINE_NUM_PREDICT):
-        self._c = OllamaClient(model=model)
+                 min_predict: int = PIPELINE_NUM_PREDICT, min_timeout: int = 3600):
+        self._c = OllamaClient(model=model, timeout=min_timeout)
         self.model = self._c.model
         self.host = self._c.host
         self._min_ctx = min_ctx
@@ -734,7 +734,7 @@ def run(args) -> int:
     print(f"workers      : {args.workers}")
     print(f"retries      : {args.retries}")
     print(f"confidence_min: {args.confidence_min}")
-    print(f"resplit_long : {'off' if args.no_resplit else 'on'}")
+    print(f"resplit_long : {'on' if args.resplit else 'off (default; holistic prompt handles it)'}")
     print(f"input        : {input_file}")
     print(f"output       : {output_file}")
     print(f"output_pdf   : {output_pdf}")
@@ -764,7 +764,7 @@ def run(args) -> int:
             target_chunk_tokens=args.target_chunk_tokens,
             verbose=not args.quiet,
             retries=args.retries,
-            resplit_long=not args.no_resplit,
+            resplit_long=args.resplit,
             metrics_sink=resplit_sink,
             sales_snippet=_store_snippet,
         )
@@ -923,8 +923,10 @@ def main() -> int:
     parser.add_argument(
         "--target-chunk-tokens",
         type=int,
-        default=36000,
-        help="максимальный объём chunks в токенах (технический лимит для контекста LLM)",
+        default=40000,
+        help="максимальный объём chunks в токенах (по умолчанию 40k — один вызов на магазин "
+             "до ~30k строк, два на ~60k, три на ~90k; выше — LLM не выдаёт корректный JSON "
+             "на CPU-инференсе, ниже — больше стыковых эффектов)",
     )
     # legacy-параметры, УДАЛЕНЫ как жёсткие правила (требование №5).
     parser.add_argument(
@@ -948,8 +950,9 @@ def main() -> int:
         help="пропустить генерацию PDF-отчёта (Excel создаётся всегда)",
     )
     parser.add_argument(
-        "--no-resplit", action="store_true",
-        help="отключить дополнительный LLM-проход re-split длинных dialog-сегментов (по умолчанию включён)",
+        "--resplit", action="store_true",
+        help="включить ДОПОЛНИТЕЛЬНЫЙ LLM-проход re-split длинных dialog-сегментов "
+             "(по умолчанию ВЫКЛЮЧЁН: основной holistic-промт сам решает границы)",
     )
     # --- EXPERIMENT: sales ground-truth (off by default; без флага pipeline работает как раньше) ---
     parser.add_argument(

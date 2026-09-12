@@ -497,11 +497,14 @@ def _format_rows_for_prompt(rows: list[Row]) -> str:
 
 # Данные (2026-08-25..2026-09-01, NEW pipeline):
 #   p50=5.0m  p75=11.1m  p90=18.2m  p95=22.8m  p99=37.8m  max=58.7m
-# => 30 min  ≈ p95 * 1.3 : «подозрительно длинный», требует проверки
+# => 20 min  ≈ p90..p95: «подозрительно длинный», требует проверки LLM
 # => 60 min  ≈ p99 * 1.6: «практически наверняка несколько клиентов»
 # Пороги НЕ жёсткие: мы НЕ режем после N минут механически. LLM решает по смыслу
-# (завершение разговора, новое приветствие, завершённая покупка + новый клиент),
-# и МОЖЕТ вернуть segments:[] для действительно одного длинного разговора.
+# (завершение разговора, новое приветствие, завершённая покупка + новый клиент).
+# 2026-09-11 iteration 2: порог возврат на 30 min (default) — новый holistic
+# сегментационный промт сам учитывает длительность/приветствия, а re-split
+# теперь opt-in (см. run.py --resplit). Для обратной совместимости env может
+# переопределить порог.
 REVIEW_LONG_SEC = int(os.getenv("OFFLINE_RESPLIT_REVIEW_SEC", str(30 * 60)))
 VERY_LONG_SEC = int(os.getenv("OFFLINE_RESPLIT_VERY_LONG_SEC", str(60 * 60)))
 # Лимит повторных обращений к LLM на один сегмент (защита от зацикливания).
@@ -523,33 +526,42 @@ _RE_END = re.compile(
 
 
 def _grep_for_client_marks(rows: Sequence[Row]) -> tuple[int, int]:
-    """Детерминированный pre-flight счётчик приветствий/завершений в блоке.
+    """(legacy) детерминированный счётчик приветствий/завершений в блоке.
 
-    Возвращает ``(greet_count, end_count)``. Служит:
-      * «force trigger» для re-сплита: если ``greet >= 2`` — сегмент попадает в
-        LLM-ревью, даже если ``dur < REVIEW_LONG_SEC`` (см. checkpoint §3.1.2);
-      * факт в пользовательском prompt — LLM «видит» маркеры как данные,
-        а не как текст (см. ``prompt.build_long_dialog_resegment_prompt``).
-
-    НЕ заменяет LLM-ревью. Просто меняет ШАНС попасть в проверку. Для одного
-    действительно длинного разговора (08-29 client_3, 58.7 мин) счётчик
-    обычно ``greet == 1`` и сегмент НЕ попадает в re-сплит (как сейчас).
+    2026-09-11 iteration 2: НЕ используется в основной сегментации (LLM решает
+    holistic). Оставлен для возможного opt-in re-split
+    (``prompt.build_long_dialog_resegment_prompt``).
     """
-    greet = 0
-    end = 0
+    greet = sum(len(_RE_GREET.findall(r.text or "")) for r in rows if (r.text or "").strip())
+    end = sum(len(_RE_END.findall(r.text or "")) for r in rows if (r.text or "").strip())
+    return greet, end
+
+
+def _positions_of_client_marks(rows: Sequence[Row]) -> tuple[list[int], list[int]]:
+    """ГЛОБАЛЬНЫЕ индексы строк, где встретились приветствия и завершения.
+
+    2026-09-03: LLM стабильно возвращала segments:[] на длинных блоках, игнорируя
+    счётчики маркеров. Даём ей конкретные позиции (индекс+время) для принятия
+    решения, а `_deterministic_split` использует ту же функцию как fallback.
+    """
+    greet_pos: list[int] = []
+    end_pos: list[int] = []
     for r in rows:
         text = r.text or ""
         if not text.strip():
             continue
-        greet += len(_RE_GREET.findall(text))
-        end += len(_RE_END.findall(text))
-    return greet, end
+        if _RE_GREET.search(text):
+            greet_pos.append(r.index)
+        if _RE_END.search(text):
+            end_pos.append(r.index)
+    return greet_pos, end_pos
 
 
 def _parse_resegment_response(
     content: str,
     segment: "Segment",
     fallback_type: str = "dialog",
+    allow_types: "set[str] | None" = None,
 ) -> list[dict] | None:
     """Разбирает ответ LLM re-segmentation.
 
@@ -559,6 +571,12 @@ def _parse_resegment_response(
                               ``[0..L-1]`` без пересечений/пропусков;
       * ``None``            — некорректный ответ (невозможно применить),
                               нужно повторить запрос.
+
+    ``allow_types`` (iter_03 rescan): если задан set, разрешает ТОЛЬКО те
+    segment type'ы в ответе. ``None`` (default, ре-сплит) — разрешены
+    dialog/employee и не-клиентские (background/unknown) автоматически
+    переименовываются в dialog (см. ниже). Для rescan-прохода вызыватель
+    передаёт ``allow_types={"dialog","employee","background","unknown"}``.
     """
     from .llm import extract_json
     obj = extract_json(content or "")
@@ -606,7 +624,12 @@ def _parse_resegment_response(
         s = max(s, segment.start_index)
         e = min(e, segment.end_index)
         stype = _clean_segment_type(item.get("type")) or fallback_type
-        if stype in ("background", "unknown"):
+        if allow_types is not None:
+            # rescan: уважаем выбранный LLM type (dialog/employee/background/unknown);
+            # неизвестный тип отбрасываем (сегмент невалиден).
+            if stype not in allow_types:
+                return None
+        elif stype in ("background", "unknown"):
             # внутри клиентского длительного фрагмента background/unknown
             # почти всегда = разговор клиента/сотрудников. Переименовываем,
             # чтобы classification-этап не ушёл в «отказ».
@@ -680,23 +703,22 @@ def resplit_long_segments(
             continue
         dur = seg.duration_sec
         seg_rows = rows[seg.start_index: seg.end_index + 1]
-        greet_n, end_n = _grep_for_client_marks(seg_rows)
-        # Кандидат на LLM-ревью, если:
-        #   * «подозрительно длинный» (dur > 30 мин), ИЛИ
-        #   * детерминированный force-trigger: ≥2 приветствия в блоке
-        #     (подтверждено на 08-27 client_3 и 08-25 client_11 —
-        #      3× и 2× «добрый день/вечер» в блоке, dur < 30 мин).
-        # force-trigger НЕ заменяет LLM-ревью: мы лишь даём шанс LLM
-        # честно ответить segments:[] (один клиент) или разбить блок
-        # (несколько клиентов), без ослабления критерия в промпте.
-        if dur < review_min and greet_n < 2:
-            # не «подозрительно длинный» и нет force-trigger — пропускаем
+        # СЛАБЫЕ признаки (приветствия/завершения) — только для информирования LLM,
+        # НЕ для принятия решения о границе. GT 03.09: «≥2 приветствия => 2 клиента»
+        # систематически резало одного клиента на 2-3 («Купил, дубль N», 9 случаев)
+        # и создавало ложных клиентов («клиента не было», 10 случаев). Решение —
+        # только на LLM (holistic, continuation-vs-new).
+        greet_idx, end_idx = _positions_of_client_marks(seg_rows)
+        greet_n, end_n = len(greet_idx), len(end_idx)
+        # 2026-09-03 iter.2: Кандидат на LLM-ревью только по длительности.
+        if dur < review_min:
+            # не «подозрительно длинный» — пропускаем (LLM решает по смыслу)
             new_segments.append(seg)
             continue
         candidates += 1
         is_very_long = dur >= very_min
-        forced = (dur < review_min and greet_n >= 2)
-        reason = "long" + ("/forced-greet≥2" if forced else "")
+        forced = False
+        reason = "long" if is_very_long else "review-len"
 
         # 3-состоятельный результат LLM-проверки:
         #   []      -> «оставить как есть» (один разговор)
@@ -712,6 +734,8 @@ def resplit_long_segments(
                 greet_count=greet_n,
                 end_count=end_n,
                 forced=forced,
+                greet_positions=greet_idx,
+                end_positions=end_idx,
             )
             # PRODUCTION-LIKE budget (matching segmentation primary call):
             # thinking-модель qwen3.8:27b требует num_ctx/num_predict с запасом,
@@ -744,8 +768,12 @@ def resplit_long_segments(
                 split_parts = parsed
             break
 
+        # 2026-09-03 iter.2: разделение решается ТОЛЬКО LLM (holistic).
+        # Детерминированный backstop (greet+end) УБРАН — он гарантированно
+        # срабатывал в сторону пере-разбиения и порил одного клиента на 2-3.
+        # Если LLM отвечает segments:[] (один клиент) — это финальное решение,
+        # мы его УВАЖАЕМ (сомнительное лучше не режать, чем сломать диалог).
         if split_parts:
-            # Разбили на N>=2. Строим новые Segment-объекты (global indices) и заменяем.
             resegmented += 1
             for i, r in enumerate(split_parts):
                 local_start = r["start_row"]
@@ -775,7 +803,7 @@ def resplit_long_segments(
                 print(f"[re-split] {seg.segment_id} ({dur/60:.1f} min) -> {len(split_parts)} сегментов; "
                       f"было: {(seg.reason or '')[:50]}...")
         else:
-            # «оставить как есть» либо LLM не смог дать корректный ответ
+            # LLM: «оставить как есть» (один клиент) либо не дал корректного ответа
             new_segments.append(seg)
             kept_single.append({
                 "segment_id": seg.segment_id,
@@ -807,6 +835,177 @@ def resplit_long_segments(
         prev = s.end_index
     if rows:
         assert prev == len(rows) - 1, (prev, len(rows))
+    return new_segments, metrics
+
+
+# ---------------------------------------------------------------------------
+# iter_03: RESCAN non-dialog blocks (второй проход).
+#
+# Основная сегментация видит большой чанк целиком и «поглощает» короткие
+# клиентские визиты в длинные employee/background-блоки. Второй проход берёт
+# каждый non-dialog блок >= min_rows строк и просит LLM проверить, есть ли
+# внутри реальный клиентский диалог. Если да — блокируются в отдельные
+# dialog-сегменты (остальное остаётся employee/background/unknown по смыслу).
+# Если LLM отвечает segments:[] — блок остаётся единым (без изменений).
+#
+# Инвариант: покрытие [0..total-1] сохраняется (каждый non-dialog блок
+# заменяется на набор соседних сегментов, суммарно покрывающих тот же
+# интервал строк).
+# ---------------------------------------------------------------------------
+
+def rescan_nondialog_blocks(
+    segments: list[Segment],
+    rows: list[Row],
+    llm: "LLM | None",
+    store_id: str = "",
+    min_rows: int = 10,
+    verbose: bool = True,
+) -> tuple[list[Segment], dict]:
+    """iter_03: второй проход над employee/background/unknown блоками.
+
+    Возвращает ``(new_segments, metrics)``:
+      * ``new_segments`` — новый список сегментов (покрытие [0..N-1] сохранено).
+      * ``metrics`` — статистика: сколько блоков проверено, сколько LLM-вызовов,
+        сколько блоков было разбито, сколько новых dialog-сегментов появилось.
+
+    Если ``llm is None`` — сегменты не меняются (fallback для тестов/offline).
+    """
+    if llm is None or not segments:
+        return segments, {
+            "candidates": 0, "rescanned": 0, "llm_calls": 0,
+            "new_dialogs": 0, "split_from": [], "kept_single": [],
+            "min_rows": min_rows,
+        }
+
+    from .prompt import RESCAN_NONDIALOG_SYSTEM_PROMPT, build_rescan_nondialog_prompt
+
+    new_segments: list[Segment] = []
+    candidates = 0
+    rescanned = 0
+    llm_calls = 0
+    new_dialogs = 0
+    split_from: list[dict] = []
+    kept_single: list[dict] = []
+
+    for seg in segments:
+        if seg.segment_type not in ("employee", "background", "unknown"):
+            new_segments.append(seg)
+            continue
+        L = seg.end_index - seg.start_index + 1
+        if L < min_rows:
+            new_segments.append(seg)
+            continue
+        candidates += 1
+        seg_rows = rows[seg.start_index: seg.end_index + 1]
+        # 3-состояние (как в resplit_long_segments):
+        #   []      -> «оставить как есть»
+        #   [seg..] -> разбить
+        #   None    -> невалидный ответ -> оставить без изменений
+        split_parts: list[dict] | None = None
+        keep = None
+        last_err: Exception | None = None
+        import os as _os
+        num_ctx = int(_os.getenv("OFFLINE_NUM_CTX", "131072"))
+        num_predict = int(_os.getenv("OFFLINE_NUM_PREDICT", "128000"))
+        for _attempt in range(MAX_RESEGMENT_ATTEMPTS):
+            user = build_rescan_nondialog_prompt(store_id, seg_rows, seg.segment_type)
+            try:
+                resp = llm.chat_json(RESCAN_NONDIALOG_SYSTEM_PROMPT, user,
+                                     num_ctx=num_ctx, num_predict=num_predict)
+                content = resp.get("content", "") if isinstance(resp, dict) else ""
+            except TypeError:
+                resp = llm.chat_json(RESCAN_NONDIALOG_SYSTEM_PROMPT, user)
+                content = resp.get("content", "") if isinstance(resp, dict) else ""
+            except Exception as exc:  # noqa: BLE001
+                last_err = exc
+                if verbose:
+                    print(f"[rescan] {seg.segment_id}: retry ({last_err})")
+                continue
+            llm_calls += 1
+            # переиспользуем _parse_resegment_response (покрывает тот же
+            # контракт [seg.start..seg.end]).
+            # allow_types — rescan-mode: LLM обязан выбрать один из 4 типов
+            # (dialog/employee/background/unknown); не переименовываем.
+            parsed = _parse_resegment_response(
+                content, seg, fallback_type="background",
+                allow_types={"dialog", "employee", "background", "unknown"},
+            )
+            if parsed is None:
+                last_err = ValueError("invalid / cannot cover block")
+                if verbose:
+                    print(f"[rescan] {seg.segment_id}: retry ({last_err})")
+                continue
+            if parsed == []:
+                keep = True
+            else:
+                split_parts = parsed
+            break
+
+        if split_parts:
+            rescanned += 1
+            dlg = 0
+            for i, r in enumerate(split_parts):
+                local_start = r["start_row"]
+                local_end = r["end_row"]
+                global_start = seg.start_index + local_start
+                global_end = seg.start_index + local_end
+                t = r.get("type", seg.segment_type)
+                if t == "dialog":
+                    dlg += 1
+                new_segments.append(Segment(
+                    segment_id=f"{seg.segment_id}r{i + 1}",
+                    store_id=store_id,
+                    start_index=global_start,
+                    end_index=global_end,
+                    segment_type=t,
+                    confidence=r.get("confidence", 0.4),
+                    reason=r.get("reason"),
+                    rows=[rows[global_start + k] for k in range(global_end - global_start + 1)],
+                ))
+            new_dialogs += dlg
+            split_from.append({
+                "segment_id": seg.segment_id,
+                "start_index": seg.start_index,
+                "end_index": seg.end_index,
+                "duration_sec": round(seg.duration_sec, 1),
+                "subsegments": len(split_parts),
+                "new_dialogs": dlg,
+                "last_error": None,
+            })
+            if verbose:
+                print(f"[rescan] {seg.segment_id} ({L} rows) -> {len(split_parts)} "
+                      f"сегментов; новых dialog={dlg}")
+        else:
+            new_segments.append(seg)
+            kept_single.append({
+                "segment_id": seg.segment_id,
+                "start_index": seg.start_index,
+                "end_index": seg.end_index,
+                "duration_sec": round(seg.duration_sec, 1),
+                "rows": L,
+                "last_error": str(last_err) if last_err else None,
+            })
+            if verbose and keep is None:
+                print(f"[rescan] {seg.segment_id} ({L} rows): оставлен "
+                      f"(LLM: {last_err})")
+
+    # Инвариант покрытия (см. resplit_long_segments)
+    prev = -1
+    for s in new_segments:
+        assert s.start_index == prev + 1, (prev, s)
+        prev = s.end_index
+    if rows:
+        assert prev == len(rows) - 1, (prev, len(rows))
+
+    metrics = {
+        "candidates": candidates,
+        "rescanned": rescanned,
+        "llm_calls": llm_calls,
+        "new_dialogs": new_dialogs,
+        "split_from": split_from,
+        "kept_single": kept_single,
+        "min_rows": min_rows,
+    }
     return new_segments, metrics
 
 
@@ -888,7 +1087,7 @@ def _segment_one_chunk(
     # на prompt + answer. kwargs передаём осторожно: старые fake-клиенты могут
     # не принимать именованные параметры.
     try:
-        resp = llm.chat_json(system, user, num_ctx=64000, num_predict=16000)
+        resp = llm.chat_json(system, user, num_ctx=131072, num_predict=128000)
     except TypeError:
         resp = llm.chat_json(system, user)
     content = resp.get("content", "") if isinstance(resp, dict) else ""
@@ -908,6 +1107,8 @@ def segment_rows(
     resplit_thresholds: tuple[int, int] = (REVIEW_LONG_SEC, VERY_LONG_SEC),
     metrics_sink: dict | None = None,
     sales_snippet: str | None = None,
+    rescan_nondialog: bool = False,
+    rescan_nondialog_min_rows: int = 10,
 ) -> list[Segment]:
     """Сегментирует поток строк дня.
 
@@ -921,6 +1122,11 @@ def segment_rows(
     над «подозрительно длинными» dialog-сегментами (``resplit_thresholds``)
     для обнаружения нескольких последовательных клиентских взаимодействий
     внутри одного блока. Отключается в юнит-тестах и при llm=None.
+
+    ``rescan_nondialog`` (default=False, iter_03) — второй LLM-проход над
+    employee/background/unknown блоками (``rescan_nondialog_min_rows``+ строк),
+    чтобы «вытащить» внутрь спрятанные короткие клиентские визиты. Отключается
+    по умолчанию; включается только в режиме экспериментирования.
     """
     if not rows:
         return []
@@ -939,35 +1145,60 @@ def segment_rows(
     else:
         chunks = build_chunks(rows, target_tokens=target_chunk_tokens, seam_context=seam_context)
         raw_all: list[dict] = []
+
+        def _seg_chunks(chunk_list: list[list[Row]], depth: int = 0) -> list[dict]:
+            """Рекурсивно сегментирует список чанков. Если чанк стабильно
+            возвращает пустой ответ (LLM не укладывается в контекст на загруженной
+            CPU-машине) — разбиваем его ПОПОЛАМ (рекурсия до 1 строки), уменьшая
+            объём запроса. Это надёжнее фолбэка «1300 unknown-строк»."""
+            out: list[dict] = []
+            for cl in chunk_list:
+                if len(cl) <= 1:
+                    out.append({
+                        "start_row": cl[0].index, "end_row": cl[0].index,
+                        "type": fallback_type, "confidence": 0.0,
+                        "reason": "LLM error / minimum size",
+                    })
+                    continue
+                chunk_raw: list[dict] | None = None
+                last_err: Exception | None = None
+                for attempt in range(retries + 1):
+                    try:
+                        candidate = _segment_one_chunk(
+                            llm, cl, store_id, 1, 1, fallback_type,
+                            sales_snippet=sales_snippet,
+                        )
+                        if candidate:
+                            chunk_raw = candidate
+                            break
+                        last_err = ValueError("empty segmentation from LLM")
+                    except Exception as exc:  # noqa: BLE001 — логируем и пробуем ещё
+                        last_err = exc
+                    if verbose:
+                        print(f"[seg] chunk rows={len(cl)} attempt {attempt + 1}: {last_err}")
+                if chunk_raw is not None:
+                    out.extend(chunk_raw)
+                elif depth < 3:
+                    if verbose:
+                        print(f"[seg] chunk rows={len(cl)} failed after {retries + 1} — "
+                              f"splits into halves")
+                    mid = len(cl) // 2
+                    out.extend(_seg_chunks([cl[:mid], cl[mid:]], depth + 1))
+                else:
+                    if verbose:
+                        print(f"[seg] chunk rows={len(cl)} gave up after max recursion")
+                    out.extend([
+                        {"start_row": r.index, "end_row": r.index,
+                         "type": fallback_type, "confidence": 0.0,
+                         "reason": f"LLM error: {last_err}"}
+                        for r in cl
+                    ])
+            return out
+
         for idx, (chunk_rows, _is_seam) in enumerate(chunks):
             chunk_size = measure_rows(chunk_rows)
             log_size(f"SEGMENTATION REQUEST #{idx + 1}/{len(chunks)} (seam={_is_seam})", chunk_size, verbose=verbose)
-            chunk_raw: list[dict] | None = None
-            last_err: Exception | None = None
-            for attempt in range(retries + 1):
-                try:
-                    candidate = _segment_one_chunk(
-                        llm, chunk_rows, store_id, idx + 1, len(chunks), fallback_type,
-                        sales_snippet=sales_snippet,
-                    )
-                    if candidate:
-                        chunk_raw = candidate
-                        break
-                    last_err = ValueError("empty segmentation from LLM")
-                except Exception as exc:  # noqa: BLE001 — логируем и пробуем ещё
-                    last_err = exc
-                if verbose:
-                    print(f"[seg] request #{idx + 1} attempt {attempt + 1}: {last_err}")
-            if chunk_raw is None:
-                # Fallback: каждую строку чанка -> single-row segment (покрытие гарантируется,
-                # мы не делаем один огромный "unknown" блок на весь чанк).
-                chunk_raw = [
-                    {"start_row": r.index, "end_row": r.index,
-                     "type": fallback_type, "confidence": 0.0,
-                     "reason": f"LLM error: {last_err}"}
-                    for r in chunk_rows
-                ]
-            raw_all.extend(chunk_raw)
+            raw_all.extend(_seg_chunks([chunk_rows]))
 
         # глобальный ремонт: слияние через стыки, заделка дыр
         repaired = repair_segments(raw_all, total, fallback_type=fallback_type)
@@ -997,16 +1228,13 @@ def segment_rows(
     assert prev == total - 1
 
     # Дополнительный прогон над «подозрительно длинными» dialog-сегментами
-    # ИЛИ dialog-сегментами с ≥2 приветствиями (force-trigger, см. checkpoint §3.1.2):
-    # ищем несколько последовательных клиентских взаимодействий внутри
-    # одного блока (завершение + новое появление/новая покупка).
-    # Если LLM вернёт корректный набор N>=2 тилей — заменяем сегмент,
-    # иначе оставляем как есть. В любом случае инвариант покрытия сохраняется
-    # (re-split использует только валидные tile-совокупности).
+    # (по длительности): LLM решает, есть ли внутри несколько независимых
+    # клиентских взаимодействий. 2026-09-03 iter.2: force-trigger по
+    # «≥2 приветствия» УБРАН (см. resplit_long_segments) — он гарантированно
+    # режет одного клиента на 2-3 и создаёт false-positive purchase.
     review_min = resplit_thresholds[0]
     has_force_trigger = any(
-        s.segment_type == "dialog"
-        and (s.duration_sec >= review_min or _grep_for_client_marks(s.rows)[0] >= 2)
+        s.segment_type == "dialog" and s.duration_sec >= review_min
         for s in segments
     )
     if resplit_long and llm is not None and has_force_trigger:
@@ -1020,6 +1248,27 @@ def segment_rows(
             # Акумулируем метрики (по несколько магазинов):
             #   int/float -> сумма; list -> extend; dict -> update/merge.
             for k, v in resplit_metrics.items():
+                if isinstance(v, (int, float)):
+                    metrics_sink[k] = metrics_sink.get(k, 0) + v
+                elif isinstance(v, list):
+                    existing = metrics_sink.get(k) or []
+                    existing.extend(v)
+                    metrics_sink[k] = existing
+                elif isinstance(v, dict):
+                    existing = metrics_sink.get(k) or {}
+                    existing.update(v)
+                    metrics_sink[k] = existing
+
+    # iter_03: второй проход над non-dialog блоками (default off)
+    if rescan_nondialog and llm is not None:
+        segments, rescan_metrics = rescan_nondialog_blocks(
+            segments, rows, llm,
+            store_id=store_id,
+            min_rows=rescan_nondialog_min_rows,
+            verbose=verbose,
+        )
+        if metrics_sink is not None:
+            for k, v in rescan_metrics.items():
                 if isinstance(v, (int, float)):
                     metrics_sink[k] = metrics_sink.get(k, 0) + v
                 elif isinstance(v, list):

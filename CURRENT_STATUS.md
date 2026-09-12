@@ -134,6 +134,20 @@ llm_errors=0.** Статус: **ALL FINAL VALID + ALL PDF VALID** (pdfinfo 1–1
 4. **Sales GT эксперимент (08-27)**: baseline `_experiment_baseline_08-27.json` (80 реальных продаж;
    strict recall 0.325, 39 NOT_FOUND, 15 false-positive buy, 10 multi-sale dialogs) — см. секцию ниже.
 5. Regression NEW vs OLD: `COMPARISON.md` + `regression_new/` (исторический прогон).
+6. **Итерации сегментации 2026-09-03 (segmentation-only, 91 GT / 77 in-window)** — см.
+   `regression_0903/ITERATIONS_0903.md`. **Лучший baseline = iter_01** (59 dialogs; CORRECT=6,
+   SPLIT=11, MERGED=23, PARTIAL=14, MISSED=23, EXTRA=12, found=70.1%).
+   - **iter_04** (prompt SPLIT-protection): REGRESSED (SPLIT 11→15, CORRECT 6→4) → **prompt REVERTED**
+     к baseline (`prompt.py::SEGMENTATION_SYSTEM_PROMPT` len=6889, правило убрано).
+   - **iter_04b** (merge-only boundary review, 5 merges): SPLIT 11→24, CORRECT 6→3, но MISSED 23→14,
+     found 70.1→81.8% — recall-прибавка ценой SPLIT/MERGED; не берётся в production.
+   - **Вывод:** «SPLIT=11» отчасти артефакт GT-качества — 9/11 SPLIT-строк лежат на GT-окнах,
+     которые PЕРЕСЕКАЮТСЯ с другими GT-окнами того же магазина. Т.ч. метрика SPLIT на этих строках
+     недостоверна, пока GT не расдублирована. Реальная слабость AI — over-split по
+     «приветствие/самопрезентация внутри одной сделки» (9/11 SPLIT, все 3 магазина).
+   - **Рекомендация:** принимать SPLIT≈11 как частично GT-лимитированный; прежде чем дальше
+     оптимизировать SPLIT — **переаннотировать перекрывающиеся GT-окна** (pervom_012/015/017,
+     minvod_029/030, beshta_010). Production-конфиг LLM/пайплайн **не менялся**.
 
 ## Ground truth как канал качества (основной)
 
@@ -195,3 +209,34 @@ llm_errors=0.** Статус: **ALL FINAL VALID + ALL PDF VALID** (pdfinfo 1–1
 - Покрытие строк: all raw rows → final (unassigned=0), дублей нет.
 - Realtime-контур (Kafka topics, PostgreSQL schema, alert-логика) — отдельно, не трогают offline-работы.
 - Бэкап старых final-файлов перед перезаписью (паттерн `batch_run.py` → `reports_root_backup/`).
+
+---
+
+## NEXT START POINT (обновлено 2026-09-12: GT уже очищена — см. findings ниже)
+
+**Сделано (09-03 GT-фаза закрыта):**
+- GT дедупликация/деде-оверлап завершена: `regression_0903/gt_clean_2026-09-03_v1.xlsx`
+  = **40 клиентских миссий, 0 пересечений** (91 → 40). Сведено 14 дублей/под-строк;
+  не-клиентские точки (БСО/Прочее/Вакансия/Забыл/Корп) отнесены к noise.
+  Аудит удалённых строк: **ни одной реальной покупки не потеряно** (все «Купил»-строки —
+  дочерние окна уже сохранённых parent-окон).
+- **Пересчёт существующих итераций на чистой GT** (`regression_0903/compare_clean_gt.py`,
+  `compare_clean_gt.csv`, скорер `seg_eval.py` без изменений):
+  - **iter_01 = лучший базлайн** (CORRECT=8, SPLIT=9, MERGED=2, PARTIAL=9, MISSED=4,
+    EXTRA=22, found=87.5%, correct%=25.0%).
+  - На чистой GT SPLIT=9 и MERGED=2, т.е. «SPLIT/MERGED = 11/23» на старой GT —
+    **артефакт перекрывающихся GT-окон, а не дефект AI**.
+  - 4 MISSED = 0 АСР-текст (un-audible) или employee/analytic — **noise floor**,
+    не recall loss. Rescan-nondialog (iter_06) не дал смысла: все «missed» невосстановимы.
+- **Новая цель точности** = **EXTRA** (ложные клиентские диалоги в noise/employee).
+  Это реальный оставшийся дефект precision; SPLIT/MERGED больше НЕ гонять.
+- **Просроченный** plan-§ "GT пока не надёжен" — уже надёжен (clean GT v1, 0 overlaps).
+
+**Следующий ход (не обязательно в этом порядке):**
+1. **EXTRA**: понять, какие false dialogs создаёт модель в employee/background-блоках.
+   Диагностика: `EXTRA` строки в `iter01_vs_cleanGT_table.csv` → сверить с текстом.
+2. Если есть конкретные pattern ложных срабатываний — точечный prompt-изменение
+   **на чистую GT** (не blind).
+3. P0 по 08-27 (sales GT recall=0.325, см. TODO.md) — отдельный эксперимент,
+   не связан с 09-03 segmentation.
+
