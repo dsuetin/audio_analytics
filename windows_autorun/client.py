@@ -220,6 +220,10 @@ CHUNK_MS = 150
 AUDIO_RECONNECT_DELAY = 2.0
 # How long without an audio callback before we consider the stream dead.
 AUDIO_CALLBACK_TIMEOUT = 3.0
+# While a stream is open, re-resolve the hardware ID at this interval.  A
+# PortAudio index is only a short-lived handle and may be reassigned after a
+# USB device is disconnected.
+AUDIO_DEVICE_CHECK_INTERVAL = 1.0
 
 # Heartbeat is updated every N seconds while the process is alive.
 HEARTBEAT_INTERVAL = 30.0
@@ -675,7 +679,7 @@ def _audio_device_names_for_id(device_id):
     return names
 
 
-def _match_by_device_id(device_id):
+def _match_by_device_id(device_id, log_match=True):
     """Resolve an audio input index from a stable USB hardware id.
 
     Returns an int device index or None. The endpoint is located by name: the
@@ -710,22 +714,24 @@ def _match_by_device_id(device_id):
         bl = base.lower()
         for idx, dev in inputs:
             if dev.get("name", "").strip().lower() == bl:
-                logger.info(
-                    "AUDIO_DEVICE_ID=%s -> resolved index=%d "
-                    "device name=%r (match_kind=exact, pnp_id=%s)",
-                    device_id, idx, dev.get("name", "?"), base,
-                )
+                if log_match:
+                    logger.info(
+                        "AUDIO_DEVICE_ID=%s -> resolved index=%d "
+                        "device name=%r (match_kind=exact, pnp_id=%s)",
+                        device_id, idx, dev.get("name", "?"), base,
+                    )
                 return idx
     for base in base_names:
         bl = base.lower()
         for idx, dev in inputs:
             try:
                 if bl in dev.get("name", "").lower():
-                    logger.info(
-                        "AUDIO_DEVICE_ID=%s -> resolved index=%d "
-                        "device name=%r (match_kind=substring, pnp_id=%s)",
-                        device_id, idx, dev.get("name", "?"), base,
-                    )
+                    if log_match:
+                        logger.info(
+                            "AUDIO_DEVICE_ID=%s -> resolved index=%d "
+                            "device name=%r (match_kind=substring, pnp_id=%s)",
+                            device_id, idx, dev.get("name", "?"), base,
+                        )
                     return idx
             except Exception:
                 continue
@@ -858,6 +864,46 @@ def get_audio_device():
     return None
 
 
+def target_device_matches_stream(stream_device, stream_name):
+    """Confirm that an open/pending stream still belongs to AUDIO_DEVICE_ID.
+
+    The hardware ID is authoritative.  The PortAudio index is deliberately
+    re-resolved on every check; if it disappeared or moved, the caller must
+    close the stream before yielding another audio chunk.
+    """
+    if not AUDIO_DEVICE_ID:
+        return True
+
+    current_device = _match_by_device_id(AUDIO_DEVICE_ID, log_match=False)
+    if current_device is None:
+        logger.warning(
+            "Target microphone AUDIO_DEVICE_ID=%s disappeared while "
+            "stream was active; closing stream (no fallback)",
+            AUDIO_DEVICE_ID,
+        )
+        return False
+
+    try:
+        current_name = sd.query_devices(current_device).get("name", "?")
+    except Exception as exc:
+        logger.warning(
+            "Could not verify target microphone AUDIO_DEVICE_ID=%s: %s; "
+            "closing stream (no fallback)",
+            AUDIO_DEVICE_ID, exc,
+        )
+        return False
+
+    if current_device != stream_device or current_name != stream_name:
+        logger.warning(
+            "Target microphone mapping changed: stream index=%s name=%r, "
+            "current target index=%s name=%r; closing stream before audio "
+            "is sent",
+            stream_device, stream_name, current_device, current_name,
+        )
+        return False
+    return True
+
+
 def resolve_audio_device():
     """Convenience wrapper returning (index_or_None, is_configured)."""
     return get_audio_device()
@@ -959,6 +1005,7 @@ def mic_stream(session_id, stop_event):
                     "(no fallback to default input)",
                     AUDIO_DEVICE_ID,
                 )
+
             time.sleep(AUDIO_RECONNECT_DELAY)
             continue
 
@@ -969,12 +1016,9 @@ def mic_stream(session_id, stop_event):
             logger.info(
                 "Configured AUDIO_DEVICE_ID=%s | Resolved device index=%s "
                 "| Resolved device name=%s",
-                AUDIO_DEVICE_ID or "<unset>", device, device_name,
-            )
-
-            status_writer.update(
-                mic_connected=True,
-                mic_device=device_name,
+                AUDIO_DEVICE_ID or "<unset>",
+                device,
+                device_name,
             )
 
             audio_queue = queue.Queue(maxsize=50)
@@ -1013,15 +1057,58 @@ def mic_stream(session_id, stop_event):
                     logger.info(
                         "Target microphone AUDIO_DEVICE_ID=%s restored "
                         "(stream opened on index %d, name=%r)",
-                        AUDIO_DEVICE_ID, device, device_name,
+                        AUDIO_DEVICE_ID,
+                        device,
+                        device_name,
                     )
 
-                while not stop_event.is_set() and not shutdown_event.is_set():
+                status_writer.update(
+                    mic_connected=True,
+                    mic_device=device_name,
+                )
+
+                while (
+                    not stop_event.is_set()
+                    and not shutdown_event.is_set()
+                ):
+                    # -------------------------------------------------
+                    # КРИТИЧЕСКАЯ ПРОВЕРКА:
+                    # устройство нужно заново разрешать по
+                    # AUDIO_DEVICE_ID, а не доверять старому index.
+                    #
+                    # Это защищает от ситуации:
+                    #
+                    #   LJM был index=1
+                    #   LJM отключили
+                    #   webcam заняла index=1
+                    #
+                    # В этом случае get_audio_device() либо вернёт
+                    # другой index LJM, либо None.
+                    # -------------------------------------------------
+                    if AUDIO_DEVICE_ID:
+                        if not target_device_matches_stream(
+                            device,
+                            device_name,
+                        ):
+                            logger.error(
+                                "TARGET MICROPHONE ASSERTION FAILED: "
+                                "opened stream is no longer confirmed "
+                                "as AUDIO_DEVICE_ID=%s "
+                                "(opened index=%s name=%r). "
+                                "Closing stream immediately; "
+                                "NO FALLBACK microphone will be used.",
+                                AUDIO_DEVICE_ID,
+                                device,
+                                device_name,
+                            )
+
+                            break
 
                     # Если callback перестал приходить —
                     # считаем устройство потерянным.
                     callback_age = (
-                        time.monotonic() - audio_state["last_callback"]
+                        time.monotonic()
+                        - audio_state["last_callback"]
                     )
 
                     if callback_age > AUDIO_CALLBACK_TIMEOUT:
@@ -1048,6 +1135,26 @@ def mic_stream(session_id, stop_event):
                     if audio is None:
                         continue
 
+                    # -------------------------------------------------
+                    # Перед отправкой аудио ещё раз убеждаемся, что
+                    # целевой микрофон всё ещё тот же.
+                    #
+                    # Это особенно важно, если устройство исчезло
+                    # между watchdog-проверками.
+                    # -------------------------------------------------
+                    if AUDIO_DEVICE_ID:
+                        if not target_device_matches_stream(
+                            device,
+                            device_name,
+                        ):
+                            logger.error(
+                                "TARGET MICROPHONE LOST before audio send: "
+                                "AUDIO_DEVICE_ID=%s. "
+                                "Dropping audio and reconnecting.",
+                                AUDIO_DEVICE_ID,
+                            )
+                            break
+
                     yield bridge_pb2.MicChunk(
                         session_id=session_id,
                         audio=audio.tobytes(),
@@ -1060,7 +1167,7 @@ def mic_stream(session_id, stop_event):
 
             finally:
                 # КРИТИЧНО:
-                # при потере DJI обязательно полностью закрываем
+                # при потере целевого микрофона полностью закрываем
                 # старый PortAudio stream.
                 if stream is not None:
                     try:
@@ -1073,16 +1180,21 @@ def mic_stream(session_id, stop_event):
                     except Exception:
                         pass
 
-                session_monitor.clear_queue()
+                # У SessionMonitor должен использоваться clear().
+                session_monitor.clear()
 
-                if not stop_event.is_set() and not shutdown_event.is_set():
+                if (
+                    not stop_event.is_set()
+                    and not shutdown_event.is_set()
+                ):
                     status_writer.update(
                         mic_connected=False,
                         mic_device="",
                     )
 
                 logger.info(
-                    "Microphone stream closed; will search for device again"
+                    "Microphone stream closed; "
+                    "will search for device again"
                 )
 
         except Exception:
@@ -1097,10 +1209,12 @@ def mic_stream(session_id, stop_event):
                 mic_device="",
             )
 
-        if not stop_event.is_set() and not shutdown_event.is_set():
+        if (
+            not stop_event.is_set()
+            and not shutdown_event.is_set()
+        ):
             app_clock.touch()
             time.sleep(AUDIO_RECONNECT_DELAY)
-
 # ============================================================
 # EVENT HELPERS
 # ============================================================
