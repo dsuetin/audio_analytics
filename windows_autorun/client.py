@@ -41,6 +41,7 @@ from aiokafka.errors import (
 
 import bridge_pb2
 import bridge_pb2_grpc
+from audio_buffer import AudioBuffer, SAMPLE_RATE, CHUNK_MS, BLOCK_SIZE_SAMPLES, MAX_BATCH_SAMPLES
 
 
 # ============================================================
@@ -391,26 +392,25 @@ kafka_clock = AppClock()
 
 
 class SessionMonitor:
-    """Tracks the active microphone session's chunk queue.
+    """Tracks the active microphone session's audio buffer.
 
-    If the gRPC send path stops draining the queue (consumer thread wedged),
-    the queue stays full with no drain progress - that is a hang, and the
-    heartbeat must go stale so the external watchdog can restart the client.
+    If the gRPC send path stops draining the buffer, the backlog grows
+    with no drain progress - that is a hang, and the heartbeat must go stale.
     """
 
     def __init__(self):
         self._lock = threading.Lock()
-        self.queue = None
+        self.buffer = None
         self.last_drain = time.monotonic()
 
-    def set_queue(self, q):
+    def set_queue(self, buffer):
         with self._lock:
-            self.queue = q
+            self.buffer = buffer
             self.last_drain = time.monotonic()
 
     def clear(self):
         with self._lock:
-            self.queue = None
+            self.buffer = None
 
     def touch_drain(self):
         with self._lock:
@@ -418,7 +418,7 @@ class SessionMonitor:
 
     def snapshot(self):
         with self._lock:
-            return self.queue, self.last_drain
+            return self.buffer, self.last_drain
 
 
 session_monitor = SessionMonitor()
@@ -459,13 +459,15 @@ class Heartbeat:
                 elif kafka_age > self.stall_threshold:
                     stale = "kafka loop stalled %.0fs" % kafka_age
 
-                # If the audio queue is full and not being drained, the gRPC
-                # send path is wedged (consumer thread stuck).
-                q, last_drain = session_monitor.snapshot()
-                if q is not None and not q.empty() and stale is None:
-                    drain_age = time.monotonic() - last_drain
-                    if drain_age > self.stall_threshold:
-                        stale = "audio queue full & undrained for %.0fs" % drain_age
+                # If the audio buffer backlog is growing and not being drained,
+                # the gRPC send path is wedged (consumer thread stuck).
+                buf, last_drain = session_monitor.snapshot()
+                if buf is not None and stale is None:
+                    backlog_sec = buf.get_backlog_seconds()
+                    if backlog_sec > 1.0:
+                        drain_age = time.monotonic() - last_drain
+                        if drain_age > self.stall_threshold:
+                            stale = "audio backlog=%.1fs undrained for %.0fs" % (backlog_sec, drain_age)
 
                 if stale:
                     logger.critical(
@@ -937,21 +939,15 @@ def check_audio():
 # AUDIO CALLBACK
 # ============================================================
 
-def make_audio_callback(audio_queue, audio_state):
+def make_audio_callback(audio_buffer: AudioBuffer, audio_state):
     def callback(indata, frames, time_info, status):
         if status:
             logger.warning("Audio stream status=%s", status)
         audio_state["last_callback"] = time.monotonic()
-        # Liveness proof #1: the microphone callback is still firing, so the
-        # audio capture pipeline is alive. (If the *process* dead-locked the
-        # heartbeat would go stale too; a wedged gRPC path is covered by log
-        # + manual restart / Task Scheduler "End task".)
         app_clock.touch()
         try:
-            audio_queue.put(indata.copy())
-            session_monitor.touch_drain()
+            audio_buffer.append(indata.tobytes())
         except Exception:
-            # A callback must never raise (PortAudio thread would die).
             logger.exception("Audio callback error")
 
     return callback
@@ -988,12 +984,8 @@ def mic_stream(session_id, stop_event):
     while not stop_event.is_set() and not shutdown_event.is_set():
         device = get_audio_device()
 
-        # Микрофона нет — продолжаем искать его.
         if device is None:
-            status_writer.update(
-                mic_connected=False,
-                mic_device="",
-            )
+            status_writer.update(mic_connected=False, mic_device="")
             app_clock.touch()
 
             if AUDIO_DEVICE_ID:
@@ -1019,18 +1011,15 @@ def mic_stream(session_id, stop_event):
                 device_name,
             )
 
-            audio_queue = queue.Queue()
+            audio_buffer = AudioBuffer()
 
-            audio_state = {
-                "last_callback": time.monotonic(),
-            }
+            audio_state = {"last_callback": time.monotonic()}
 
-            callback = make_audio_callback(audio_queue, audio_state)
-
-            session_monitor.set_queue(audio_queue)
+            callback = make_audio_callback(audio_buffer, audio_state)
 
             stream = None
             first_chunk = True
+            send_sequence = 0
 
             try:
                 stream = sd.InputStream(
@@ -1060,34 +1049,11 @@ def mic_stream(session_id, stop_event):
                         device_name,
                     )
 
-                status_writer.update(
-                    mic_connected=True,
-                    mic_device=device_name,
-                )
+                status_writer.update(mic_connected=True, mic_device=device_name)
 
-                while (
-                    not stop_event.is_set()
-                    and not shutdown_event.is_set()
-                ):
-                    # -------------------------------------------------
-                    # КРИТИЧЕСКАЯ ПРОВЕРКА:
-                    # устройство нужно заново разрешать по
-                    # AUDIO_DEVICE_ID, а не доверять старому index.
-                    #
-                    # Это защищает от ситуации:
-                    #
-                    #   LJM был index=1
-                    #   LJM отключили
-                    #   webcam заняла index=1
-                    #
-                    # В этом случае get_audio_device() либо вернёт
-                    # другой index LJM, либо None.
-                    # -------------------------------------------------
+                while not stop_event.is_set() and not shutdown_event.is_set():
                     if AUDIO_DEVICE_ID:
-                        if not target_device_matches_stream(
-                            device,
-                            device_name,
-                        ):
+                        if not target_device_matches_stream(device, device_name):
                             logger.error(
                                 "TARGET MICROPHONE ASSERTION FAILED: "
                                 "opened stream is no longer confirmed "
@@ -1099,15 +1065,9 @@ def mic_stream(session_id, stop_event):
                                 device,
                                 device_name,
                             )
-
                             break
 
-                    # Если callback перестал приходить —
-                    # считаем устройство потерянным.
-                    callback_age = (
-                        time.monotonic()
-                        - audio_state["last_callback"]
-                    )
+                    callback_age = time.monotonic() - audio_state["last_callback"]
 
                     if callback_age > AUDIO_CALLBACK_TIMEOUT:
                         logger.warning(
@@ -1117,7 +1077,6 @@ def mic_stream(session_id, stop_event):
                         )
                         break
 
-                    # PortAudio сам сообщил, что stream больше не активен.
                     if not stream.active:
                         logger.warning(
                             "Microphone stream became inactive; "
@@ -1125,26 +1084,16 @@ def mic_stream(session_id, stop_event):
                         )
                         break
 
-                    try:
-                        audio = audio_queue.get(timeout=0.2)
-                    except queue.Empty:
+                    batch = audio_buffer.extract_batch()
+
+                    if batch is None:
+                        time.sleep(0.05)
                         continue
 
-                    if audio is None:
-                        continue
+                    send_sequence += 1
 
-                    # -------------------------------------------------
-                    # Перед отправкой аудио ещё раз убеждаемся, что
-                    # целевой микрофон всё ещё тот же.
-                    #
-                    # Это особенно важно, если устройство исчезло
-                    # между watchdog-проверками.
-                    # -------------------------------------------------
                     if AUDIO_DEVICE_ID:
-                        if not target_device_matches_stream(
-                            device,
-                            device_name,
-                        ):
+                        if not target_device_matches_stream(device, device_name):
                             logger.error(
                                 "TARGET MICROPHONE LOST before audio send: "
                                 "AUDIO_DEVICE_ID=%s. "
@@ -1153,64 +1102,59 @@ def mic_stream(session_id, stop_event):
                             )
                             break
 
+                    backlog_sec = audio_buffer.get_backlog_seconds()
+                    batch_sec = len(batch) / 2 / SAMPLE_RATE
+
+                    logger.debug(
+                        "[BATCH] seq=%d sending=%.2fs backlog_before=%.2fs",
+                        send_sequence,
+                        batch_sec,
+                        backlog_sec,
+                    )
+
                     yield bridge_pb2.MicChunk(
                         session_id=session_id,
-                        audio=audio.tobytes(),
+                        audio=batch,
                         sample_rate=SAMPLE_RATE,
                         is_begin=first_chunk,
                         is_end=False,
                     )
 
+                    audio_buffer.commit(len(batch))
+
                     first_chunk = False
 
             finally:
-                # КРИТИЧНО:
-                # при потере целевого микрофона полностью закрываем
-                # старый PortAudio stream.
                 if stream is not None:
                     try:
                         stream.stop()
                     except Exception:
                         pass
-
                     try:
                         stream.close()
                     except Exception:
                         pass
 
-                # У SessionMonitor должен использоваться clear().
                 session_monitor.clear()
 
-                if (
-                    not stop_event.is_set()
-                    and not shutdown_event.is_set()
-                ):
-                    status_writer.update(
-                        mic_connected=False,
-                        mic_device="",
+                if not stop_event.is_set() and not shutdown_event.is_set():
+                    status_writer.update(mic_connected=False, mic_device="")
+
+                backlog = audio_buffer.get_backlog_seconds()
+                if backlog > 0:
+                    logger.warning(
+                        "Microphone stream closed with %.2fs backlog remaining",
+                        backlog,
                     )
 
-                logger.info(
-                    "Microphone stream closed; "
-                    "will search for device again"
-                )
+                logger.info("Microphone stream closed; will search for device again")
 
         except Exception:
-            # Любая ошибка открытия/работы устройства не должна
-            # убить клиент. Возвращаемся в цикл поиска.
-            logger.exception(
-                "Microphone stream error; will reconnect"
-            )
+            logger.exception("Microphone stream error; will reconnect")
 
-            status_writer.update(
-                mic_connected=False,
-                mic_device="",
-            )
+            status_writer.update(mic_connected=False, mic_device="")
 
-        if (
-            not stop_event.is_set()
-            and not shutdown_event.is_set()
-        ):
+        if not stop_event.is_set() and not shutdown_event.is_set():
             app_clock.touch()
             time.sleep(AUDIO_RECONNECT_DELAY)
 # ============================================================
