@@ -1,0 +1,41 @@
+--- a/vad/online_handler.py
++++ b/vad/online_handler.py
+@@ -65,14 +65,18 @@ class OnlineHandler:
+         logging.debug(f'Start OnlineHandler.get_speech: {start_time}')
+         logging.debug(f'\ninput batch: {batch}')
+ 
+-        # если чанк меньще дефолтного, используем маленький чанк
+-        if batch.batch.shape[0] < self.inner_window_size_samples:
+-            self.inner_window_size_samples = batch.batch.shape[0]
+-            num_inner_chunk_in_input_request = 1
+-
+-        # разделяем входной сигнал на чанки заданной длины
+-        # пока дллинна должна быть кратна размеру чанка
+-        batch.batch = batch.batch.reshape(-1, self.inner_window_size_samples)
++        num_samples = batch.batch.shape[0]
++
++        if num_samples == 0:
++            return {corrid: [] for corrid in batch.corrid_list}
++
++        num_windows = (num_samples + self.inner_window_size_samples - 1) // self.inner_window_size_samples
++        padded_size = num_windows * self.inner_window_size_samples
++
++        if padded_size > num_samples:
++            batch.batch = np.pad(batch.batch, (0, padded_size - num_samples))
++
++        batch.batch = batch.batch.reshape(num_windows, self.inner_window_size_samples)
+         logging.debug(f'Reshape chunks: {batch.batch.shape}, {batch.batch.shape[0]} * {batch.batch.shape[1]} = {batch.batch.shape[0] * batch.batch.shape[1]} \n')
+ 
+         # получаем вероятности для каждого чанка
+@@ -82,11 +86,9 @@ class OnlineHandler:
+         corrid_to_num_chunks = {}
+         for corrid_, input_audio in zip(batch.corrid_list, batch._audios):
+             audio_shape = input_audio.shape[0]
+-            # кол-во чанков в одном аудио из батча
+-            num_chunks = audio_shape / self.inner_window_size_samples
++            num_chunks = (audio_shape + self.inner_window_size_samples - 1) // self.inner_window_size_samples
+             new_corrid_list.extend([corrid_] * int(num_chunks))
+             corrid_to_num_chunks[corrid_] = num_chunks
+-            # logging.debug(f'corrid: {corrid_}, num_chunks: {num_chunks}')
+         batch.corrid_list = new_corrid_list
+         logging.debug(f'\ncorrid list: {batch.corrid_list}, num_chunks: {len(batch.corrid_list)}, num_speech_probs: {len(speech_probs)}')
