@@ -757,6 +757,13 @@ def run(args) -> int:
         day_size["characters"] += size.characters
         day_size["estimated_tokens"] += size.estimated_tokens
         _store_snippet = _sales_snippet_for_store(sales_gt, store_id) if sales_gt else None
+        
+        # Load custom system prompt if provided
+        _system_prompt = None
+        if args.system_prompt:
+            with open(args.system_prompt, "r", encoding="utf-8") as f:
+                _system_prompt = f.read()
+        
         segments = segment_rows(
             rows,
             llm=client,
@@ -767,6 +774,7 @@ def run(args) -> int:
             resplit_long=args.resplit,
             metrics_sink=resplit_sink,
             sales_snippet=_store_snippet,
+            system_prompt=_system_prompt,
         )
         all_segments.extend(segments)
     print(f"Сегментация: {len(all_segments)} сегментов дня")
@@ -918,7 +926,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Offline-анализ дневных транскрипций + финальный Excel-отчёт.")
     parser.add_argument("--input", default=None, help="сырой дневной Excel с транскрипциями")
     parser.add_argument("--output", default=None, help="путь к финальному Excel")
-    parser.add_argument("--model", default="qwen3.8:27b", help="модель Ollama")
+    parser.add_argument("--model", default="Qwen3.5-27B-UD-Q4_K_XL.gguf", help="модель llama.cpp")
     # ТЕХНИЧЕСКИЕ параметры чанкинга (НЕ жёсткие правила разделения диалогов):
     parser.add_argument(
         "--target-chunk-tokens",
@@ -968,6 +976,10 @@ def main() -> int:
         "--sales-candidate-window", type=int, default=600,
         help="EXPERIMENT: candidate-окно (сек); диалог попадает в candidate если sale внутри "
              "[start-окно, end+окно] (по умолчанию 600)",
+    )
+    parser.add_argument(
+        "--system-prompt", default=None,
+        help="EXPERIMENT: путь к файлу с кастомным system prompt для segmentation",
     )
     args = parser.parse_args()
 

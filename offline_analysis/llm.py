@@ -16,9 +16,9 @@ class OllamaClient:
     """
 
     def __init__(self, model: str | None = None, host: str | None = None, timeout: int | None = None):
-        self.model = model or os.getenv("OFFLINE_LLM_MODEL", "qwen3.8:27b")
-        self.host = (host or os.getenv("OLLAMA_HOST", "http://localhost:11434")).rstrip("/")
-        self.timeout = timeout if timeout is not None else int(os.getenv("OFFLINE_LLM_TIMEOUT", "600"))
+        self.model = model or os.getenv("OFFLINE_LLM_MODEL", "Qwen3.5-27B-UD-Q4_K_XL.gguf")
+        self.host = (host or os.getenv("LLAMACPP_HOST", "http://172.16.20.111:8082/v1")).rstrip("/")
+        self.timeout = timeout if timeout is not None else int(os.getenv("OFFLINE_LLM_TIMEOUT", "1200"))
 
     def chat_json(
         self,
@@ -28,6 +28,7 @@ class OllamaClient:
         num_ctx: int = 64000,
         num_predict: int = 8192,
         think: bool = False,
+        retries: int = 3,
     ) -> dict:
         # think=False обязательно: thinking-модель «съедает» num_predict на
         # размышление и в content может не остаться JSON. Для детерминированного
@@ -35,30 +36,37 @@ class OllamaClient:
         payload = {
             "model": self.model,
             "stream": False,
-            "options": {
-                "temperature": temperature,
-                "num_ctx": num_ctx,
-                "num_predict": num_predict,
-                "think": bool(think),
-            },
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
+            "temperature": temperature,
         }
-        try:
-            resp = requests.post(self.host + "/api/chat", json=payload, timeout=self.timeout)
-        except requests.RequestException as exc:
-            raise OllamaError(f"Ollama request failed: {exc}") from exc
-
-        if resp.status_code != 200:
-            raise OllamaError(f"Ollama HTTP {resp.status_code}: {resp.text[:500]}")
+        # Отключаем thinking/reasoning для Qwen3.5 через chat_template_kwargs
+        if not think:
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
+            print(f"[LLM] Thinking disabled via chat_template_kwargs")
+        
+        last_error = None
+        for attempt in range(retries + 1):
+            try:
+                resp = requests.post(self.host + "/chat/completions", json=payload, timeout=self.timeout)
+                if resp.status_code == 200:
+                    break
+                last_error = f"llama.cpp HTTP {resp.status_code}: {resp.text[:500]}"
+            except requests.RequestException as exc:
+                last_error = f"llama.cpp request failed (attempt {attempt + 1}/{retries + 1}): {exc}"
+        
+        if last_error:
+            raise OllamaError(last_error)
 
         data = resp.json()
         content = ""
-        message = data.get("message")
-        if isinstance(message, dict):
-            content = message.get("content", "")
+        choices = data.get("choices", [])
+        if choices and isinstance(choices[0], dict):
+            message = choices[0].get("message", {})
+            if isinstance(message, dict):
+                content = message.get("content", "")
         if not content:
             content = data.get("response", "")
         return {"content": content, "raw": data}

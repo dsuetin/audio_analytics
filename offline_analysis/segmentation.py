@@ -1051,7 +1051,9 @@ def duration_metrics(segments: list[Segment]) -> dict:
 # Основная LLM-сегментация
 # ---------------------------------------------------------------------------
 
-def _segmentation_system_prompt(store_id: str | None) -> str:
+def _segmentation_system_prompt(store_id: str | None, custom_prompt: str | None = None) -> str:
+    if custom_prompt is not None:
+        return custom_prompt
     from .prompt import SEGMENTATION_SYSTEM_PROMPT
     return SEGMENTATION_SYSTEM_PROMPT
 
@@ -1076,11 +1078,12 @@ def _segment_one_chunk(
     chunk_count: int,
     fallback_type: str = "unknown",
     sales_snippet: str | None = None,
+    system_prompt: str | None = None,
 ) -> list[dict]:
     """Сегментирует один чанк через LLM и возвращает «сырые» сегменты
     (индексы — глобальные, т.к. Row.index уже глобальный)."""
 
-    system = _segmentation_system_prompt(store_id)
+    system = _segmentation_system_prompt(store_id, system_prompt)
     user = _segmentation_user_prompt(store_id, rows, chunk_index, chunk_count, sales_snippet)
     # Сегментация шумного дня генерирует МНОГО сегментов (коротких), поэтому
     # выходной бюджет берём с запасом. num_ctx чуть больше входа, чтобы хватило
@@ -1109,6 +1112,7 @@ def segment_rows(
     sales_snippet: str | None = None,
     rescan_nondialog: bool = False,
     rescan_nondialog_min_rows: int = 10,
+    system_prompt: str | None = None,
 ) -> list[Segment]:
     """Сегментирует поток строк дня.
 
@@ -1167,6 +1171,7 @@ def segment_rows(
                         candidate = _segment_one_chunk(
                             llm, cl, store_id, 1, 1, fallback_type,
                             sales_snippet=sales_snippet,
+                            system_prompt=system_prompt,
                         )
                         if candidate:
                             chunk_raw = candidate

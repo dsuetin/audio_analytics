@@ -24,7 +24,7 @@ generated/__pycache__/
 
 minio_data/
 redpanda_data/
-
+regression*
 *.log
 *.wav
 *.whl
@@ -34,3 +34,7 @@ redpanda_data/
 *.zip
 *.json
 *.txt
+*.csv
+*.md
+*.bak*
+scripts
