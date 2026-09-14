@@ -948,10 +948,8 @@ def make_audio_callback(audio_queue, audio_state):
         # + manual restart / Task Scheduler "End task".)
         app_clock.touch()
         try:
-            audio_queue.put_nowait(indata.copy())
+            audio_queue.put(indata.copy())
             session_monitor.touch_drain()
-        except queue.Full:
-            logger.warning("Audio queue full; dropping one chunk")
         except Exception:
             # A callback must never raise (PortAudio thread would die).
             logger.exception("Audio callback error")
@@ -1021,7 +1019,7 @@ def mic_stream(session_id, stop_event):
                 device_name,
             )
 
-            audio_queue = queue.Queue(maxsize=50)
+            audio_queue = queue.Queue()
 
             audio_state = {
                 "last_callback": time.monotonic(),
