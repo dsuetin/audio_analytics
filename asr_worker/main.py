@@ -148,82 +148,91 @@ class ASRWorker:
     # session scheduler
     # ----------------------------
     def _schedule_session(self, session_id: str):
-        logger.info(
-            "schedule session=%s existing_task=%s",
-            session_id,
-            self.session_tasks.get(session_id),
-        )
-
         task = self.session_tasks.get(session_id)
 
         if task is None or task.done():
-            logger.info("create task session=%s", session_id)
+            if task is not None and task.done():
+                logger.info(
+                    "reschedule session=%s (previous task done)",
+                    session_id,
+                )
+            else:
+                logger.info(
+                    "create task session=%s",
+                    session_id,
+                )
             task = asyncio.create_task(self.process_session(session_id))
             self.session_tasks[session_id] = task
+        else:
+            logger.debug(
+                "skip schedule session=%s (task running)",
+                session_id,
+            )
 
     # ----------------------------
     # core session processing
     # ----------------------------
     async def process_session(self, session_id: str):
-        logger.info("process started %s", session_id)
+        logger.info("process_session started session=%s", session_id)
 
-        async with self.session_locks[session_id]:
+        try:
+            async with self.session_locks[session_id]:
 
-            # streaming chunks
-            chunk_id = 0
-            while True:
+                # streaming chunks
+                chunk_id = 0
+                while True:
 
-                if await self.buffer.is_end_ready(session_id):
+                    if await self.buffer.is_end_ready(session_id):
 
-                    # print("final!!!!!!!!!!!!!")
-                    final = await self.buffer.pop_all(session_id)
+                        final = await self.buffer.pop_all(session_id)
+
+                        logger.info(
+                            "ASR FINAL session=%s bytes=%s",
+                            session_id,
+                            len(final),
+                        )
+
+                        await self.asr.send(
+                            session_id,
+                            final,
+                            is_last=True,
+                        )
+
+                        self.buffer.buf.pop(session_id, None)
+                        self.buffer.locks.pop(session_id, None)
+
+                        # cleanup ASR state
+                        self.asr.started.discard(session_id)
+                        self.asr.seq_map.pop(session_id, None)
+
+                        logger.info("session closed session=%s", session_id)
+                        break
+
+                    chunk = await self.buffer.pop_if_ready(
+                        session_id,
+                        min_ms=160,
+                    )
+                    chunk_id += 1
+
+                    if chunk is None:
+                        await asyncio.sleep(0.05)
+                        continue
 
                     logger.info(
-                        "ASR FINAL session=%s bytes=%s",
+                        "ASR stream session=%s chunk=%s bytes=%s",
                         session_id,
-                        len(final),
+                        chunk_id,
+                        len(chunk),
                     )
 
                     await self.asr.send(
                         session_id,
-                        final,
-                        is_last=True,
+                        chunk,
+                        is_last=False,
                     )
-
-                    self.buffer.buf.pop(session_id, None)
-                    self.buffer.locks.pop(session_id, None)
-
-                    # cleanup ASR state
-                    self.asr.started.discard(session_id)
-                    self.asr.seq_map.pop(session_id, None)
-
-                    # cleanup session state
-                    self.session_tasks.pop(session_id, None)
-                    self.session_locks.pop(session_id, None)
-
-                    logger.info("session closed session=%s", session_id)
-            
-
-                chunk = await self.buffer.pop_if_ready(
-                    session_id,
-                    min_ms=160,
-                )
-                chunk_id += 1
-
-                if chunk is None:
-                    break
-
-                logger.info(
-                    "ASR stream session=%s bytes=%s",
-                    session_id,
-                    len(chunk),
-                )
-
-                await self.asr.send(
-                    session_id,
-                    chunk,
-                    is_last=False,
-                )
+        finally:
+            self.session_tasks.pop(session_id, None)
+            self.session_locks.pop(session_id, None)
 
                 
 
