@@ -38,3 +38,7 @@ regression*
 *.md
 *.bak*
 scripts
+*.sh
+autorun/
+windows_autorun/
+*.backup

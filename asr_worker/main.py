@@ -163,12 +163,13 @@ class ASRWorker:
         try:
             async with self.session_locks[session_id]:
 
-                # streaming chunks
+                # streaming chunks with adaptive batching
                 chunk_id = 0
                 while True:
 
                     if await self.buffer.is_end_ready(session_id):
 
+                        # Send remaining data as final batch
                         final = await self.buffer.pop_all(session_id)
 
                         logger.info(
@@ -193,28 +194,42 @@ class ASRWorker:
                         logger.info("session closed session=%s", session_id)
                         break
 
-                    chunk = await self.buffer.pop_if_ready(
-                        session_id,
-                        min_ms=160,
-                    )
+                    # Extract batch with adaptive batching (1 to 93 chunks)
+                    batch = await self.buffer.extract_batch(session_id)
                     chunk_id += 1
 
-                    if chunk is None:
+                    if batch is None:
                         await asyncio.sleep(0.05)
                         continue
 
+                    batch_seconds = len(batch) / 2 / 16000
                     logger.debug(
-                        "ASR stream session=%s chunk=%s bytes=%s",
+                        "ASR batch session=%s chunk=%s bytes=%s (%.2fs)",
                         session_id,
                         chunk_id,
-                        len(chunk),
+                        len(batch),
+                        batch_seconds,
                     )
 
-                    await self.asr.send(
-                        session_id,
-                        chunk,
-                        is_last=False,
-                    )
+                    # Send batch to ASR
+                    try:
+                        await self.asr.send(
+                            session_id,
+                            batch,
+                            is_last=False,
+                        )
+                        # Commit only after successful send
+                        await self.buffer.commit(session_id, len(batch))
+                    except Exception as e:
+                        logger.error(
+                            "ASR send failed session=%s chunk=%s: %s",
+                            session_id,
+                            chunk_id,
+                            e,
+                        )
+                        # Do NOT commit - batch remains in buffer for retry
+                        await asyncio.sleep(0.1)
+                        continue
         finally:
             self.session_tasks.pop(session_id, None)
             self.session_locks.pop(session_id, None)
