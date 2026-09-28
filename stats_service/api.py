@@ -5,10 +5,14 @@ import io
 import wave
 import tempfile
 import boto3
+import re
+import json
 from typing import Optional
+import pandas as pd
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, HTMLResponse, Response
+from stats_service.stores import get_all_stores
 
 app = FastAPI(title="Stats Service")
 
@@ -23,6 +27,29 @@ S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL", "http://localhost:9000")
 S3_ACCESS_KEY_ID = os.getenv("S3_ACCESS_KEY_ID", "minioadmin")
 S3_SECRET_ACCESS_KEY = os.getenv("S3_SECRET_ACCESS_KEY", "minioadmin")
 S3_BUCKET = os.getenv("S3_BUCKET", "audio-sessions")
+
+REPORT_PATTERN = re.compile(r"final_transcript_report_(\d{4}-\d{2}-\d{2})\.xlsx")
+
+
+def get_available_dates() -> list[str]:
+    """Get list of available report dates from the reports directory"""
+    dates = set()
+    for filepath in REPORT_DIR.glob("final_transcript_report_*.xlsx"):
+        match = REPORT_PATTERN.search(filepath.name)
+        if match:
+            dates.add(match.group(1))
+    return sorted(dates)
+
+
+def load_report_data(date_str: str) -> Optional[pd.DataFrame]:
+    """Load report data for a given date"""
+    report_path = REPORT_DIR / f"final_transcript_report_{date_str}.xlsx"
+    if not report_path.exists():
+        return None
+    try:
+        return pd.read_excel(report_path)
+    except Exception:
+        return None
 
 
 def get_s3_client():
@@ -363,7 +390,7 @@ AUDIO_PAGE_HTML = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Скачать аудио — Audio Analytics</title>
+<title>Аудио по отчётам — Audio Analytics</title>
 <style>
   :root {
     --bg: #f3f5f9;
@@ -378,26 +405,25 @@ AUDIO_PAGE_HTML = """<!doctype html>
     --error-text: #b91c1c;
   }
   * { box-sizing: border-box; }
-  html, body { height: 100%; }
   body {
     margin: 0;
     background: var(--bg);
     color: var(--text);
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
       "Helvetica Neue", Arial, sans-serif;
-    display: flex;
-    align-items: center;
-    justify-content: center;
     padding: 24px;
+  }
+  .container {
+    max-width: 1200px;
+    margin: 0 auto;
   }
   .card {
     background: var(--card);
     border: 1px solid var(--border);
     border-radius: 16px;
     box-shadow: 0 1px 3px rgba(16, 24, 40, 0.06), 0 8px 24px rgba(16, 24, 40, 0.06);
-    width: 100%;
-    max-width: 480px;
-    padding: 40px 36px;
+    padding: 32px;
+    margin-bottom: 24px;
   }
   h1 {
     margin: 0 0 8px;
@@ -406,7 +432,7 @@ AUDIO_PAGE_HTML = """<!doctype html>
     letter-spacing: -0.02em;
   }
   .subtitle {
-    margin: 0 0 28px;
+    margin: 0 0 24px;
     color: var(--muted);
     font-size: 15px;
     line-height: 1.5;
@@ -417,8 +443,7 @@ AUDIO_PAGE_HTML = """<!doctype html>
     font-size: 14px;
     font-weight: 500;
   }
-  input[type="text"],
-  input[type="datetime-local"] {
+  select, input[type="date"] {
     width: 100%;
     padding: 11px 12px;
     font-size: 15px;
@@ -430,42 +455,62 @@ AUDIO_PAGE_HTML = """<!doctype html>
     transition: border-color 0.15s, box-shadow 0.15s;
     margin-bottom: 16px;
   }
-  input[type="text"]:focus,
-  input[type="datetime-local"]:focus {
+  select:focus, input[type="date"]:focus {
     border-color: var(--accent);
     box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
   }
-  button {
+  .filters {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+  .filters > div {
+    display: flex;
+    flex-direction: column;
+  }
+  table {
     width: 100%;
-    margin-top: 20px;
-    padding: 12px 16px;
-    font-size: 15px;
+    border-collapse: collapse;
+    margin-top: 16px;
+  }
+  th, td {
+    padding: 12px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+  }
+  th {
+    background: #f9fafb;
+    font-weight: 600;
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+  }
+  td {
+    font-size: 14px;
+  }
+  tr:hover {
+    background: #f9fafb;
+  }
+  .btn {
+    padding: 8px 16px;
+    font-size: 14px;
     font-weight: 600;
     color: #fff;
     background: var(--accent);
     border: none;
-    border-radius: 10px;
+    border-radius: 8px;
     cursor: pointer;
     transition: background 0.15s;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 10px;
+    text-decoration: none;
+    display: inline-block;
+    text-align: center;
   }
-  button:hover:not(:disabled) { background: var(--accent-hover); }
-  button:disabled { opacity: 0.7; cursor: default; }
-  .spinner {
-    width: 16px;
-    height: 16px;
-    border: 2px solid rgba(255, 255, 255, 0.4);
-    border-top-color: #fff;
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-  }
-  @keyframes spin { to { transform: rotate(360deg); } }
+  .btn:hover:not(:disabled) { background: var(--accent-hover); }
+  .btn:disabled { opacity: 0.7; cursor: not-allowed; }
   .alert {
     display: none;
-    margin-top: 20px;
     padding: 12px 14px;
     font-size: 14px;
     line-height: 1.45;
@@ -473,207 +518,211 @@ AUDIO_PAGE_HTML = """<!doctype html>
     background: var(--error-bg);
     border: 1px solid var(--error-border);
     border-radius: 10px;
+    margin-top: 16px;
   }
   .alert.visible { display: block; }
-  .hint {
-    margin-top: 18px;
-    font-size: 13px;
-    color: var(--muted);
-  }
   .nav-link {
-    display: block;
+    display: inline-block;
     margin-top: 12px;
     padding: 8px 12px;
-    text-align: center;
     color: var(--accent);
     text-decoration: none;
     border-radius: 8px;
     transition: background 0.15s;
   }
   .nav-link:hover { background: rgba(37, 99, 235, 0.1); }
-  .status {
-    margin-top: 16px;
-    padding: 10px 12px;
-    font-size: 14px;
-    border-radius: 8px;
-    display: none;
+  .loading {
+    text-align: center;
+    padding: 40px;
+    color: var(--muted);
   }
-  .status.loading {
-    display: block;
-    background: #eff6ff;
-    color: #1e40af;
-    border: 1px solid #bfdbfe;
+  .spinner {
+    width: 24px;
+    height: 24px;
+    border: 3px solid rgba(37, 99, 235, 0.2);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    margin: 0 auto 16px;
   }
-  .status.success {
-    display: block;
-    background: #f0fdf4;
-    color: #166534;
-    border: 1px solid #bbf7d0;
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .no-data {
+    text-align: center;
+    padding: 40px;
+    color: var(--muted);
+    font-size: 15px;
   }
 </style>
 </head>
 <body>
-  <main class="card">
-    <h1>Скачать аудио</h1>
-    <p class="subtitle">Укажите магазин и временной интервал для выгрузки аудио.</p>
+  <div class="container">
+    <div class="card">
+      <h1>Аудио по отчётам</h1>
+      <p class="subtitle">Выберите дату отчёта, магазин и клиента для просмотра доступных аудиозаписей.</p>
 
-    <form id="audio-form">
-      <label for="store">Магазин</label>
-      <input type="text" id="store" name="store" placeholder="Например: Минводы" required>
+      <div class="filters">
+        <div>
+          <label for="date-select">Дата отчёта</label>
+          <select id="date-select"></select>
+        </div>
+         <div>
+           <label for="store-select">Магазин</label>
+           <select id="store-select">
+             <option value="all">Все магазины</option>
+           </select>
+         </div>
+       </div>
 
-      <label for="start_time">Время начала</label>
-      <input type="datetime-local" id="start_time" name="start_time" required>
-
-      <label for="end_time">Время окончания</label>
-      <input type="datetime-local" id="end_time" name="end_time" required>
-
-      <button type="submit" id="submit-btn">
-        <span class="spinner" id="spinner" hidden></span>
-        <span id="btn-label">Скачать аудио</span>
-      </button>
+      <div id="table-container">
+        <div class="loading">
+          <div class="spinner"></div>
+          <div>Выберите дату для загрузки данных</div>
+        </div>
+      </div>
 
       <div class="alert" id="alert" role="alert"></div>
-      <div class="status" id="status"></div>
-    </form>
 
-    <p class="hint">Аудио будет скачано в формате WAV. Фактическая длительность может отличаться от календарного интервала.</p>
-    <a href="/" class="nav-link">Вернуться к отчётам</a>
-  </main>
+      <a href="/" class="nav-link">← Вернуться к отчётам</a>
+    </div>
+  </div>
 
 <script>
 (function () {
-  var form = document.getElementById("audio-form");
-  var storeInput = document.getElementById("store");
-  var startTimeInput = document.getElementById("start_time");
-  var endTimeInput = document.getElementById("end_time");
-  var button = document.getElementById("submit-btn");
-  var label = document.getElementById("btn-label");
-  var spinner = document.getElementById("spinner");
+  var dateSelect = document.getElementById("date-select");
+  var storeSelect = document.getElementById("store-select");
+  var tableContainer = document.getElementById("table-container");
   var alertBox = document.getElementById("alert");
-  var statusBox = document.getElementById("status");
-  var pending = false;
-
-  function setLoading(loading) {
-    pending = loading;
-    button.disabled = loading;
-    spinner.hidden = !loading;
-    label.textContent = loading ? "Обработка..." : "Скачать аудио";
-  }
+  var currentData = null;
 
   function showError(message) {
     alertBox.textContent = message;
     alertBox.classList.add("visible");
-    statusBox.className = "status";
   }
 
-  function showStatus(message, type) {
-    statusBox.textContent = message;
-    statusBox.className = "status " + type;
+  function hideError() {
     alertBox.classList.remove("visible");
   }
 
-  function validateForm() {
-    var store = storeInput.value.trim();
-    var startValue = startTimeInput.value;
-    var endValue = endTimeInput.value;
-
-    if (!store) {
-      showError("Укажите название магазина.");
-      return false;
-    }
-
-    if (!startValue) {
-      showError("Укажите время начала.");
-      return false;
-    }
-
-    if (!endValue) {
-      showError("Укажите время окончания.");
-      return false;
-    }
-
-    var start = new Date(startValue);
-    var end = new Date(endValue);
-
-    if (start >= end) {
-      showError("Время начала должно быть раньше времени окончания.");
-      return false;
-    }
-
-    return true;
+  function formatDuration(seconds) {
+    var mins = Math.floor(seconds / 60);
+    var secs = Math.floor(seconds % 60);
+    return mins.toString().padStart(2, "0") + ":" + secs.toString().padStart(2, "0");
   }
 
-  function toIsoLocal(value) {
-    var dt = new Date(value);
-    var offset = dt.getTimezoneOffset();
-    var localDt = new Date(dt.getTime() - offset * 60 * 1000);
-    return localDt.toISOString().replace("\\.000Z$", "");
-  }
-
-  form.addEventListener("submit", async function (event) {
-    event.preventDefault();
-    if (pending) {
+  function renderTable(dialogs) {
+    if (!dialogs || dialogs.length === 0) {
+      tableContainer.innerHTML = '<div class="no-data">Нет данных для отображения</div>';
       return;
     }
 
-    if (!validateForm()) {
-      return;
+    var dateStr = dateSelect.value;
+    var html = '<table><thead><tr>' +
+      '<th>Магазин</th>' +
+      '<th>Клиент</th>' +
+      '<th>Начало</th>' +
+      '<th>Конец</th>' +
+      '<th>Длительность</th>' +
+      '<th>Аудио</th>' +
+      '</tr></thead><tbody>';
+
+    for (var i = 0; i < dialogs.length; i++) {
+      var d = dialogs[i];
+      var sessionIdsEncoded = encodeURIComponent(d.session_ids.join(","));
+      var downloadUrl = "/api/audio/download-by-dialog?date_str=" + encodeURIComponent(dateStr) + "&session_ids=" + sessionIdsEncoded;
+      html += '<tr>' +
+        '<td>' + escapeHtml(d.store_id) + '</td>' +
+        '<td>' + escapeHtml(d.client_id) + '</td>' +
+        '<td>' + d.start_time + '</td>' +
+        '<td>' + d.end_time + '</td>' +
+        '<td>' + formatDuration(d.duration_sec) + '</td>' +
+        '<td><a href="' + downloadUrl + '" class="btn">Скачать</a></td>' +
+        '</tr>';
     }
 
-    alertBox.classList.remove("visible");
-    statusBox.className = "status";
-    setLoading(true);
+    html += '</tbody></table>';
+    tableContainer.innerHTML = html;
+  }
+
+  function escapeHtml(text) {
+    var div = document.createElement("div");
+    div.textContent = text;
+    return div.innerHTML;
+  }
+
+  async function loadStores() {
+    try {
+      var response = await fetch("/api/stores");
+      if (!response.ok) {
+        throw new Error("Failed to load stores");
+      }
+      var data = await response.json();
+      storeSelect.innerHTML = '<option value="all">Все магазины</option>';
+      for (var i = 0; i < data.stores.length; i++) {
+        var option = document.createElement("option");
+        option.value = data.stores[i];
+        option.textContent = data.stores[i];
+        storeSelect.appendChild(option);
+      }
+    } catch (error) {
+      showError("Не удалось загрузить список магазинов: " + error.message);
+    }
+  }
+
+  async function loadDates() {
+    try {
+      var response = await fetch("/api/reports/dates");
+      if (!response.ok) {
+        throw new Error("Failed to load dates");
+      }
+      var data = await response.json();
+      dateSelect.innerHTML = "";
+      for (var i = 0; i < data.dates.length; i++) {
+        var option = document.createElement("option");
+        option.value = data.dates[i];
+        option.textContent = data.dates[i].split("-").reverse().join(".");
+        dateSelect.appendChild(option);
+      }
+    } catch (error) {
+      showError("Не удалось загрузить список дат: " + error.message);
+    }
+  }
+
+  async function loadReportData() {
+    var dateStr = dateSelect.value;
+    if (!dateStr) return;
+
+    hideError();
+    tableContainer.innerHTML = '<div class="loading"><div class="spinner"></div><div>Загрузка данных...</div></div>';
 
     try {
-      var store = storeInput.value.trim();
-      var startTimeIso = toIsoLocal(startTimeInput.value);
-      var endTimeIso = toIsoLocal(endTimeInput.value);
+      var storeFilter = storeSelect.value === "all" ? undefined : storeSelect.value;
 
-      var url = "/audio/download?store=" + encodeURIComponent(store)
-              + "&start_time=" + encodeURIComponent(startTimeIso)
-              + "&end_time=" + encodeURIComponent(endTimeIso);
-
-      showStatus("Загрузка аудио...", "loading");
+      var url = "/api/reports/" + encodeURIComponent(dateStr) + "/data";
+      if (storeFilter) {
+        url += "?store_filter=" + encodeURIComponent(storeFilter);
+      }
 
       var response = await fetch(url);
-
       if (!response.ok) {
-        var detail = "Ошибка при загрузке аудио";
-        try {
-          var errBody = await response.json();
-          if (errBody && errBody.detail) {
-            detail = errBody.detail;
-          }
-        } catch (e) {
-          // используем сообщение по умолчанию
-        }
-        throw new Error(detail);
+        throw new Error("Failed to load report data");
       }
 
-      var contentDisposition = response.headers.get("Content-Disposition") || "";
-      var fileName = "audio.wav";
-      var filenameMatch = contentDisposition.match(/filename="?([^";]+)"?/);
-      if (filenameMatch && filenameMatch[1]) {
-        fileName = filenameMatch[1];
-      }
-
-      var blob = await response.blob();
-      var url = URL.createObjectURL(blob);
-      var link = document.createElement("a");
-      link.href = url;
-      link.download = fileName;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      URL.revokeObjectURL(url);
-
-      showStatus("Аудио успешно скачано!", "success");
+      var data = await response.json();
+      currentData = data;
+      renderTable(data.dialogs);
     } catch (error) {
-      showError(error.message || "Не удалось загрузить аудио. Попробуйте ещё раз.");
-    } finally {
-      setLoading(false);
+      showError("Не удалось загрузить данные: " + error.message);
     }
+  }
+
+  dateSelect.addEventListener("change", function () {
+    loadReportData();
   });
+
+  storeSelect.addEventListener("change", loadReportData);
+
+  loadStores();
+  loadDates();
 })();
 </script>
 </body>
@@ -714,6 +763,89 @@ def generate_report(report_date: date):
         filename=final_path.name,
         media_type="application/zip",
     )
+
+
+@app.get("/api/stores")
+def get_stores():
+    """Get fixed list of all known stores"""
+    try:
+        stores = get_all_stores()
+        return {"stores": stores}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get stores: {str(e)}")
+
+
+@app.get("/api/reports/dates")
+def get_reports_dates():
+    """Get list of available report dates"""
+    try:
+        dates = get_available_dates()
+        return {"dates": dates}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get report dates: {str(e)}")
+
+
+@app.get("/api/reports/{date_str}/data")
+def get_report_data(
+    date_str: str,
+    store_filter: Optional[str] = Query(None, description="Filter by store (optional)"),
+    client_filter: Optional[str] = Query(None, description="Filter by client (optional)"),
+):
+    """Get report data for a given date with optional filters"""
+    # Validate date format
+    try:
+        datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+
+    df = load_report_data(date_str)
+    if df is None:
+        raise HTTPException(status_code=404, detail=f"No report found for date {date_str}")
+
+    # Apply filters
+    if store_filter and store_filter != "all":
+        df = df[df["store_id"] == store_filter]
+    if client_filter and client_filter != "all":
+        df = df[df["client_id"] == client_filter]
+
+    if df.empty:
+        return {
+            "date": date_str,
+            "dialogs": [],
+            "stores": [],
+            "clients": [],
+        }
+
+    # Prepare dialog data
+    dialogs = []
+    for _, row in df.iterrows():
+        start_time = row["dialog_start_at"]
+        end_time = row["dialog_end_at"]
+        session_ids_str = row["session_ids"] if pd.notna(row["session_ids"]) else ""
+        session_ids = [s.strip() for s in session_ids_str.split(",") if s.strip()]
+
+        dialogs.append({
+            "client_id": row["client_id"],
+            "store_id": row["store_id"],
+            "seller_id": row["seller_id"],
+            "start_time": start_time.strftime("%H:%M:%S") if hasattr(start_time, "strftime") else str(start_time),
+            "end_time": end_time.strftime("%H:%M:%S") if hasattr(end_time, "strftime") else str(end_time),
+            "duration_sec": row["dialog_duration_sec"],
+            "session_ids": session_ids,
+            "is_sale": row["is_sale"],
+            "dialog_type": row["dialog_type"],
+        })
+
+    # Get unique stores and clients from filtered data
+    stores = df["store_id"].unique().tolist() if "store_id" in df.columns else []
+    clients = df["client_id"].unique().tolist() if "client_id" in df.columns else []
+
+    return {
+        "date": date_str,
+        "dialogs": dialogs,
+        "stores": sorted(stores),
+        "clients": sorted(clients),
+    }
 
 
 @app.get("/audio/download")
@@ -771,6 +903,57 @@ def download_audio(
         else:
             filename_ascii += "_"
     filename = f"audio_{date_str}_{filename_ascii}_{start_time.strftime('%H-%M')}_to_{end_time.strftime('%H-%M')}.wav"
+
+    return Response(
+        content=audio_buffer.read(),
+        media_type="audio/wav",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/api/audio/download-by-dialog")
+def download_audio_by_dialog(
+    date_str: str = Query(..., description="Date in YYYY-MM-DD format"),
+    session_ids: str = Query(..., description="Comma-separated session IDs"),
+):
+    """Download audio for a specific dialog by session IDs"""
+    # Parse session IDs
+    session_list = [s.strip() for s in session_ids.split(",") if s.strip()]
+    if not session_list:
+        raise HTTPException(status_code=400, detail="No session IDs provided")
+
+    # Extract date from first session ID (format: YYYYMMDD-HHMMSS-...)
+    try:
+        first_session = session_list[0]
+        session_date = first_session.split("-")[0]
+        session_date_str = f"{session_date[:4]}-{session_date[4:6]}-{session_date[6:8]}"
+    except (IndexError, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid session ID format")
+
+    s3_client = get_s3_client()
+
+    # Download and merge audio for all sessions
+    all_audio_data = []
+    for session_id in session_list:
+        try:
+            audio_data = download_session_chunks(s3_client, session_id)
+            if audio_data:
+                all_audio_data.append(audio_data)
+        except Exception:
+            continue
+
+    if not all_audio_data:
+        raise HTTPException(
+            status_code=404,
+            detail="No audio data available for the selected sessions",
+        )
+
+    audio_buffer = merge_audio_sessions(all_audio_data)
+    audio_buffer.seek(0)
+
+    # Generate filename
+    safe_date = date_str.replace("-", "")
+    filename = f"audio_{safe_date}_dialog.wav"
 
     return Response(
         content=audio_buffer.read(),
