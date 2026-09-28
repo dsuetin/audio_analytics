@@ -634,6 +634,8 @@ AUDIO_PAGE_HTML = """<!doctype html>
       '<th>Начало</th>' +
       '<th>Конец</th>' +
       '<th>Длительность</th>' +
+      '<th>Цель визита</th>' +
+      '<th>Результат</th>' +
       '<th>Аудио</th>' +
       '</tr></thead><tbody>';
 
@@ -641,18 +643,34 @@ AUDIO_PAGE_HTML = """<!doctype html>
       var d = dialogs[i];
       var sessionIdsEncoded = encodeURIComponent(d.session_ids.join(","));
       var downloadUrl = "/api/audio/download-by-dialog?date_str=" + encodeURIComponent(dateStr) + "&session_ids=" + sessionIdsEncoded;
+      var dialogType = getDialogTypeLabel(d.dialog_type);
+      var saleResult = d.is_sale ? "Покупка" : "Нет покупки";
       html += '<tr>' +
         '<td>' + escapeHtml(d.store_id) + '</td>' +
         '<td>' + escapeHtml(d.client_id) + '</td>' +
         '<td>' + d.start_time + '</td>' +
         '<td>' + d.end_time + '</td>' +
         '<td>' + formatDuration(d.duration_sec) + '</td>' +
+        '<td>' + dialogType + '</td>' +
+        '<td>' + saleResult + '</td>' +
         '<td><a href="' + downloadUrl + '" class="btn">Скачать</a></td>' +
         '</tr>';
     }
 
     html += '</tbody></table>';
     tableContainer.innerHTML = html;
+  }
+
+  function getDialogTypeLabel(type) {
+    var labels = {
+      "help": "Помощь",
+      "service": "Сервис",
+      "complaint": "Рекламация",
+      "buy": "Покупка",
+      "other": "Другое",
+      "unknown": "Неизвестно"
+    };
+    return labels[type] || (type || "-");
   }
 
   function escapeHtml(text) {
