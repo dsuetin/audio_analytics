@@ -570,7 +570,7 @@ AUDIO_PAGE_HTML = """<!doctype html>
   .tooltip-cell:hover::after {
     content: attr(data-tooltip);
     position: absolute;
-    left: 100%;
+    right: 100%;
     top: 50%;
     transform: translateY(-50%);
     background: linear-gradient(135deg, #f8f9ff 0%, #f0f4ff 100%);
@@ -580,23 +580,23 @@ AUDIO_PAGE_HTML = """<!doctype html>
     font-size: 15px;
     line-height: 1.7;
     min-width: 350px;
-    max-width: 700px;
+    max-width: 600px;
     white-space: pre-wrap;
     word-wrap: break-word;
     z-index: 1000;
     box-shadow: 0 12px 48px rgba(59, 130, 246, 0.25);
-    margin-left: 16px;
+    margin-right: 16px;
     border: 2px solid #e8efff;
   }
   .tooltip-cell:hover::before {
     content: '';
     position: absolute;
-    left: 100%;
+    right: 100%;
     top: 50%;
     transform: translateY(-50%);
     border: 12px solid transparent;
-    border-right-color: #e8efff;
-    margin-left: -12px;
+    border-left-color: #e8efff;
+    margin-right: -12px;
     margin-top: -12px;
     z-index: 999;
   }
@@ -705,6 +705,8 @@ AUDIO_PAGE_HTML = """<!doctype html>
       var saleResult = d.is_sale ? "Покупка" : "Нет покупки";
       var reasoning = d.model_reasoning || "Нет объяснения";
       var reasoningEscaped = escapeHtml(reasoning);
+      var recognitionText = d.recognition_text || "Нет текста";
+      var recognitionTextEscaped = escapeHtml(recognitionText);
       var commentKey = dateStr + '_' + d.store_id + '_' + d.client_id;
       var existingComment = userComments[commentKey] || '';
       var existingCommentEscaped = escapeHtml(existingComment);
@@ -713,7 +715,7 @@ AUDIO_PAGE_HTML = """<!doctype html>
         '<td>' + escapeHtml(d.client_id) + '</td>' +
         '<td>' + d.start_time + '</td>' +
         '<td>' + d.end_time + '</td>' +
-        '<td>' + formatDuration(d.duration_sec) + '</td>' +
+        '<td class="tooltip-cell" data-tooltip="' + recognitionTextEscaped + '">' + formatDuration(d.duration_sec) + '</td>' +
         '<td class="tooltip-cell" data-tooltip="' + reasoningEscaped + '">' + dialogType + '</td>' +
         '<td>' + saleResult + '</td>' +
         '<td style="width: 300px;">' +
@@ -1364,6 +1366,7 @@ def get_report_data(
             "is_sale": row["is_sale"],
             "dialog_type": row["dialog_type"],
             "model_reasoning": row["model_reasoning"] if pd.notna(row["model_reasoning"]) else "",
+            "recognition_text": row["recognition_text"] if pd.notna(row["recognition_text"]) else "",
         })
 
     # Get unique stores and clients from filtered data
