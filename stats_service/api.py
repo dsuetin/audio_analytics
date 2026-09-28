@@ -561,6 +561,43 @@ AUDIO_PAGE_HTML = """<!doctype html>
     color: var(--muted);
     font-size: 15px;
   }
+  .tooltip-cell {
+    position: relative;
+    cursor: help;
+  }
+  .tooltip-cell:hover::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    left: 100%;
+    top: 50%;
+    transform: translateY(-50%);
+    background: linear-gradient(135deg, #f8f9ff 0%, #f0f4ff 100%);
+    color: #1a1a2e;
+    padding: 20px 24px;
+    border-radius: 16px;
+    font-size: 15px;
+    line-height: 1.7;
+    min-width: 350px;
+    max-width: 700px;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    z-index: 1000;
+    box-shadow: 0 12px 48px rgba(59, 130, 246, 0.25);
+    margin-left: 16px;
+    border: 2px solid #e8efff;
+  }
+  .tooltip-cell:hover::before {
+    content: '';
+    position: absolute;
+    left: 100%;
+    top: 50%;
+    transform: translateY(-50%);
+    border: 12px solid transparent;
+    border-right-color: #e8efff;
+    margin-left: -12px;
+    margin-top: -12px;
+    z-index: 999;
+  }
 </style>
 </head>
 <body>
@@ -645,13 +682,15 @@ AUDIO_PAGE_HTML = """<!doctype html>
       var downloadUrl = "/api/audio/download-by-dialog?date_str=" + encodeURIComponent(dateStr) + "&session_ids=" + sessionIdsEncoded;
       var dialogType = getDialogTypeLabel(d.dialog_type);
       var saleResult = d.is_sale ? "Покупка" : "Нет покупки";
+      var reasoning = d.model_reasoning || "Нет объяснения";
+      var reasoningEscaped = escapeHtml(reasoning);
       html += '<tr>' +
         '<td>' + escapeHtml(d.store_id) + '</td>' +
         '<td>' + escapeHtml(d.client_id) + '</td>' +
         '<td>' + d.start_time + '</td>' +
         '<td>' + d.end_time + '</td>' +
         '<td>' + formatDuration(d.duration_sec) + '</td>' +
-        '<td>' + dialogType + '</td>' +
+        '<td class="tooltip-cell" data-tooltip="' + reasoningEscaped + '">' + dialogType + '</td>' +
         '<td>' + saleResult + '</td>' +
         '<td><a href="' + downloadUrl + '" class="btn">Скачать</a></td>' +
         '</tr>';
@@ -1168,6 +1207,7 @@ def get_report_data(
             "session_ids": session_ids,
             "is_sale": row["is_sale"],
             "dialog_type": row["dialog_type"],
+            "model_reasoning": row["model_reasoning"] if pd.notna(row["model_reasoning"]) else "",
         })
 
     # Get unique stores and clients from filtered data
