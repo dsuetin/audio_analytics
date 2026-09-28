@@ -4,7 +4,6 @@ This is used for the dropdown selection in the audio download UI.
 """
 
 STORES = [
-    "test_PC",
     "г_Армавир_ул_Советской_Армии_37",
     "г_Минеральные_Воды_ул_Гагарина_",
     "г_Минеральные_Воды_ул_Московска",

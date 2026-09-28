@@ -272,6 +272,12 @@ INDEX_HTML = """<!doctype html>
     transition: background 0.15s;
   }
   .nav-link:hover { background: rgba(37, 99, 235, 0.1); }
+  .nav-links {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 12px;
+  }
 </style>
 </head>
 <body>
@@ -292,7 +298,10 @@ INDEX_HTML = """<!doctype html>
     </form>
 
     <p class="hint">Отчёт включает все разговоры за выбранную дату (файл Excel).</p>
-    <a href="/audio" class="nav-link">Скачать аудио по магазину</a>
+    <div class="nav-links">
+      <a href="/audio" class="nav-link">Скачать аудио по отчётам</a>
+      <a href="/audio/time-range" class="nav-link">Скачать аудио по времени</a>
+    </div>
   </main>
 
 <script>
@@ -582,7 +591,10 @@ AUDIO_PAGE_HTML = """<!doctype html>
 
       <div class="alert" id="alert" role="alert"></div>
 
-      <a href="/" class="nav-link">← Вернуться к отчётам</a>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">
+        <a href="/audio/time-range" class="nav-link">Скачать аудио по времени</a>
+        <a href="/" class="nav-link">← Вернуться к отчётам</a>
+      </div>
     </div>
   </div>
 
@@ -729,6 +741,305 @@ AUDIO_PAGE_HTML = """<!doctype html>
 </html>
 """
 
+AUDIO_TIME_RANGE_HTML = """<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Скачать аудио по времени — Audio Analytics</title>
+<style>
+  :root {
+    --bg: #f3f5f9;
+    --card: #ffffff;
+    --text: #1f2937;
+    --muted: #6b7280;
+    --border: #e5e7eb;
+    --accent: #2563eb;
+    --accent-hover: #1d4ed8;
+    --error-bg: #fef2f2;
+    --error-border: #fecaca;
+    --error-text: #b91c1c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+      "Helvetica Neue", Arial, sans-serif;
+    padding: 24px;
+  }
+  .container {
+    max-width: 600px;
+    margin: 0 auto;
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    box-shadow: 0 1px 3px rgba(16, 24, 40, 0.06), 0 8px 24px rgba(16, 24, 40, 0.06);
+    padding: 32px;
+  }
+  h1 {
+    margin: 0 0 8px;
+    font-size: 24px;
+    font-weight: 650;
+    letter-spacing: -0.02em;
+  }
+  .subtitle {
+    margin: 0 0 24px;
+    color: var(--muted);
+    font-size: 15px;
+    line-height: 1.5;
+  }
+  label {
+    display: block;
+    margin: 0 0 8px;
+    font-size: 14px;
+    font-weight: 500;
+  }
+  select, input[type="datetime-local"] {
+    width: 100%;
+    padding: 11px 12px;
+    font-size: 15px;
+    color: var(--text);
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    outline: none;
+    transition: border-color 0.15s, box-shadow 0.15s;
+    margin-bottom: 16px;
+  }
+  select:focus, input[type="datetime-local"]:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
+  }
+  button {
+    width: 100%;
+    padding: 12px 16px;
+    font-size: 15px;
+    font-weight: 600;
+    color: #fff;
+    background: var(--accent);
+    border: none;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: background 0.15s;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+  }
+  button:hover:not(:disabled) { background: var(--accent-hover); }
+  button:disabled { opacity: 0.7; cursor: default; }
+  .spinner {
+    width: 16px;
+    height: 16px;
+    border: 2px solid rgba(255, 255, 255, 0.4);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .alert {
+    display: none;
+    padding: 12px 14px;
+    font-size: 14px;
+    line-height: 1.45;
+    color: var(--error-text);
+    background: var(--error-bg);
+    border: 1px solid var(--error-border);
+    border-radius: 10px;
+    margin-top: 16px;
+  }
+  .alert.visible { display: block; }
+  .nav-link {
+    display: block;
+    margin-top: 12px;
+    padding: 8px 12px;
+    text-align: center;
+    color: var(--accent);
+    text-decoration: none;
+    border-radius: 8px;
+    transition: background 0.15s;
+  }
+  .nav-link:hover { background: rgba(37, 99, 235, 0.1); }
+</style>
+</head>
+<body>
+  <div class="container">
+    <div class="card">
+      <h1>Скачать аудио по времени</h1>
+      <p class="subtitle">Укажите магазин и временной интервал для выгрузки аудио.</p>
+
+      <form id="audio-form">
+        <label for="store-select">Магазин</label>
+        <select id="store-select" required></select>
+
+        <label for="start_time">Время начала</label>
+        <input type="datetime-local" id="start_time" name="start_time" required>
+
+        <label for="end_time">Время окончания</label>
+        <input type="datetime-local" id="end_time" name="end_time" required>
+
+        <button type="submit" id="submit-btn">
+          <span class="spinner" id="spinner" hidden></span>
+          <span id="btn-label">Скачать аудио</span>
+        </button>
+
+        <div class="alert" id="alert" role="alert"></div>
+      </form>
+
+      <a href="/audio" class="nav-link">Скачать аудио по отчётам</a>
+      <a href="/" class="nav-link">← Вернуться к отчётам</a>
+    </div>
+  </div>
+
+<script>
+(function () {
+  var form = document.getElementById("audio-form");
+  var storeSelect = document.getElementById("store-select");
+  var startTimeInput = document.getElementById("start_time");
+  var endTimeInput = document.getElementById("end_time");
+  var button = document.getElementById("submit-btn");
+  var label = document.getElementById("btn-label");
+  var spinner = document.getElementById("spinner");
+  var alertBox = document.getElementById("alert");
+  var pending = false;
+
+  function setLoading(loading) {
+    pending = loading;
+    button.disabled = loading;
+    spinner.hidden = !loading;
+    label.textContent = loading ? "Обработка..." : "Скачать аудио";
+  }
+
+  function showError(message) {
+    alertBox.textContent = message;
+    alertBox.classList.add("visible");
+  }
+
+  function validateForm() {
+    var store = storeSelect.value;
+    var startValue = startTimeInput.value;
+    var endValue = endTimeInput.value;
+
+    if (!store) {
+      showError("Выберите магазин.");
+      return false;
+    }
+
+    if (!startValue) {
+      showError("Укажите время начала.");
+      return false;
+    }
+
+    if (!endValue) {
+      showError("Укажите время окончания.");
+      return false;
+    }
+
+    var start = new Date(startValue);
+    var end = new Date(endValue);
+
+    if (start >= end) {
+      showError("Время начала должно быть раньше времени окончания.");
+      return false;
+    }
+
+    return true;
+  }
+
+  function toIsoLocal(value) {
+    var dt = new Date(value);
+    var offset = dt.getTimezoneOffset();
+    var localDt = new Date(dt.getTime() - offset * 60 * 1000);
+    return localDt.toISOString().replace("\\.000Z$", "");
+  }
+
+  async function loadStores() {
+    try {
+      var response = await fetch("/api/stores");
+      if (!response.ok) {
+        throw new Error("Failed to load stores");
+      }
+      var data = await response.json();
+      for (var i = 0; i < data.stores.length; i++) {
+        var option = document.createElement("option");
+        option.value = data.stores[i];
+        option.textContent = data.stores[i];
+        storeSelect.appendChild(option);
+      }
+    } catch (error) {
+      showError("Не удалось загрузить список магазинов: " + error.message);
+    }
+  }
+
+  form.addEventListener("submit", async function (event) {
+    event.preventDefault();
+    if (pending) {
+      return;
+    }
+
+    if (!validateForm()) {
+      return;
+    }
+
+    alertBox.classList.remove("visible");
+    setLoading(true);
+
+    try {
+      var store = storeSelect.value;
+      var startTimeIso = toIsoLocal(startTimeInput.value);
+      var endTimeIso = toIsoLocal(endTimeInput.value);
+
+      var url = "/audio/download?store=" + encodeURIComponent(store)
+              + "&start_time=" + encodeURIComponent(startTimeIso)
+              + "&end_time=" + encodeURIComponent(endTimeIso);
+
+      var response = await fetch(url);
+
+      if (!response.ok) {
+        var detail = "Ошибка при загрузке аудио";
+        try {
+          var errBody = await response.json();
+          if (errBody && errBody.detail) {
+            detail = errBody.detail;
+          }
+        } catch (e) {}
+        throw new Error(detail);
+      }
+
+      var contentDisposition = response.headers.get("Content-Disposition") || "";
+      var fileName = "audio.wav";
+      var filenameMatch = contentDisposition.match(/filename="?([^";]+)"?/);
+      if (filenameMatch && filenameMatch[1]) {
+        fileName = filenameMatch[1];
+      }
+
+      var blob = await response.blob();
+      var url = URL.createObjectURL(blob);
+      var link = document.createElement("a");
+      link.href = url;
+      link.download = fileName;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      showError(error.message || "Не удалось загрузить аудио. Попробуйте ещё раз.");
+    } finally {
+      setLoading(false);
+    }
+  });
+
+  loadStores();
+})();
+</script>
+</body>
+</html>
+"""
+
 
 @app.get("/", response_class=HTMLResponse)
 def index_page():
@@ -738,6 +1049,11 @@ def index_page():
 @app.get("/audio", response_class=HTMLResponse)
 def audio_page():
     return AUDIO_PAGE_HTML
+
+
+@app.get("/audio/time-range", response_class=HTMLResponse)
+def audio_time_range_page():
+    return AUDIO_TIME_RANGE_HTML
 
 
 @app.get("/reports/daily")
