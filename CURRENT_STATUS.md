@@ -2,7 +2,27 @@
 
 > Единый источник «какое состояние проекта сейчас» для OpenCode/агентов.
 > Обновлять в каждом рабочем сеансе. Детали задач — в `TODO.md`. Агентовый entry point — `AGENTS.md`.
-> Последнее обновление: 2026-09-07 (документация: дописан явный приоритет GT-RECALL и правило «сомнительное — не определять»).
+> Последнее обновление: 2026-09-28 (добавлена страница загрузки аудио по магазину и времени, Docker образ собран с boto3, контейнер daily-stats-api работает на порту 8000).
+
+## Итог сессии 2026-09-28 (добавлена страница загрузки аудио)
+
+- **Что сделано:** добавлен функционал загрузки аудио по магазину и диапазону времени через FastAPI сервис `stats_service/api.py`:
+  - Удалена искусственная тишина между аудио-чанками при слиянии (`scripts/download_audio_range.py:88-114` — silence padding убран).
+  - Добавлен endpoint `GET /audio/download` с параметрами `store`, `start_time`, `end_time`.
+  - Добавлена HTML-страница `GET /audio` с формой выбора магазина и дат/времени.
+  - Добавлены функции S3: `get_s3_client()`, `list_sessions_for_store()`, `get_session_time_minutes()`, `download_session_chunks()`, `merge_audio_sessions()`.
+  - Фильтрация сессий: включаются сессии, где `start_minutes <= session_minutes < end_minutes` (строгий диапазон).
+  - Поиск сессий по магазину: нормализация названий (убираются пробелы, приводится к нижнему регистру) для частичного совпадения.
+  - Кириллица в названии файла заменяется на `_` для совместимости с latin-1.
+  - Написано 13 тестов (`tests/test_audio_endpoint.py` — все проходят).
+  - Обновлены стобы в `tests/test_api_report_endpoint.py` (добавлены `Query`, `Response`, `boto3` моки).
+  - Добавлен `boto3` в `stats_service/requirements.txt`.
+  - Обновлён `docker-compose.yml` с переменными окружения для S3 (`S3_ENDPOINT_URL`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_BUCKET`).
+  - Обновлён Docker образ `audio_analytics-daily_stats_service:latest` с `boto3`.
+  - Контейнер `daily-stats-api` запущен через `docker compose up -d daily_stats_api` на порту 8000, работает стабильно.
+  - Добавлена навигационная ссылка с главной страницы `/` на `/audio`.
+- **Статус:** функционал готов, все тесты проходят, сервис работает.
+- **Что НЕ менялось:** production offline-поведение, raw transcripts, realtime-контур, LLM-конфиг.
 
 ## Итог сессии 2026-09-07 (продолжение после потери соединения)
 
@@ -50,6 +70,13 @@
   - PDF **не содержит** session_ids, client_id, raw JSON; `model_reasoning` — только короткий безопасный бизнес-текст (CoT/длинные рассуждения отбрасываются, см. `pdf_report.py`).
 - **Batch-режим**: `offline_analysis/batch_run.py` — пересчёт всех `reports/transcript_report_YYYY-MM-DD.xlsx` (включая **2026-08-27** и **2026-08-28**), последовательно (1 worker), ошибка одного дня не останавливает batch, raw-файлы не трогает, старые final-файлы бэкапятся (бэкап: `reports_root_backup/`).
 - **Эксперимент sales ground truth**: `offline_analysis/sales_gt.py`, включается только флагом `--sales-ground-truth <xlsx>` (без флага production-поведение не меняется).
+- **FastAPI сервис статистики**: `stats_service/api.py` на порту 8000 (контейнер `daily-stats-api`):
+  - `/` — главная страница со списком дат и навигацией.
+  - `/reports/daily` — JSON-отчёт за выбранную дату.
+  - `/audio` — страница загрузки аудио по магазину и диапазону времени.
+  - `/audio/download` — endpoint загрузки аудио (параметры: `store`, `start_time`, `end_time`).
+  - Аудио чанки из S3 (MinIO, bucket `audio-sessions`) сливаются без искусственной тишины.
+  - 13 тестов в `tests/test_audio_endpoint.py` (все проходят).
 
 ## Архитектура (кратко)
 

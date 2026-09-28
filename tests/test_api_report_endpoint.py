@@ -29,6 +29,7 @@ def _install_fastapi_stub():
 
     fastapi_stub.FastAPI = _FastAPI
     fastapi_stub.HTTPException = _HTTPException
+    fastapi_stub.Query = lambda default=None, description=None: default
 
     class _FileResponse:
         def __init__(self, path=None, filename=None, media_type=None):
@@ -39,15 +40,32 @@ def _install_fastapi_stub():
     class _HTMLResponse(str):
         pass
 
+    class _Response:
+        def __init__(self, content=None, media_type=None, headers=None):
+            self.content = content
+            self.media_type = media_type
+            self.headers = headers or {}
+
     responses_stub = types.ModuleType("fastapi.responses")
     responses_stub.FileResponse = _FileResponse
     responses_stub.HTMLResponse = _HTMLResponse
+    responses_stub.Response = _Response
     fastapi_stub.responses = responses_stub
 
     sys.modules["fastapi"] = fastapi_stub
     sys.modules["fastapi.responses"] = responses_stub
     if "uvicorn" not in sys.modules:
         sys.modules["uvicorn"] = types.ModuleType("uvicorn")
+
+    # Add boto3 stub
+    boto3_stub = types.ModuleType("boto3")
+    boto3_stub.client = lambda *args, **kwargs: None
+    sys.modules["boto3"] = boto3_stub
+
+    # Add typing.Optional stub
+    import typing
+    if not hasattr(typing, "Optional"):
+        typing.Optional = type
 
 
 def _load_api():
