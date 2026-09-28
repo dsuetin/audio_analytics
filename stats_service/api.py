@@ -23,6 +23,8 @@ REPORT_DIR = Path(
     )
 )
 
+COMMENTS_FILE = REPORT_DIR / "comments.json"
+
 S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL", "http://localhost:9000")
 S3_ACCESS_KEY_ID = os.getenv("S3_ACCESS_KEY_ID", "minioadmin")
 S3_SECRET_ACCESS_KEY = os.getenv("S3_SECRET_ACCESS_KEY", "minioadmin")
@@ -598,6 +600,24 @@ AUDIO_PAGE_HTML = """<!doctype html>
     margin-top: -12px;
     z-index: 999;
   }
+  .comment-input {
+    width: 100%;
+    padding: 8px 12px;
+    border: 2px solid #e0e7ff;
+    border-radius: 8px;
+    font-size: 13px;
+    transition: all 0.2s ease;
+    background: #fafbff;
+  }
+  .comment-input:focus {
+    outline: none;
+    border-color: #3b82f6;
+    background: #fff;
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+  }
+  .comment-input::placeholder {
+    color: #94a3b8;
+  }
 </style>
 </head>
 <body>
@@ -673,6 +693,7 @@ AUDIO_PAGE_HTML = """<!doctype html>
       '<th>Длительность</th>' +
       '<th>Цель визита</th>' +
       '<th>Результат</th>' +
+      '<th>Комментарий</th>' +
       '<th>Аудио</th>' +
       '</tr></thead><tbody>';
 
@@ -684,7 +705,10 @@ AUDIO_PAGE_HTML = """<!doctype html>
       var saleResult = d.is_sale ? "Покупка" : "Нет покупки";
       var reasoning = d.model_reasoning || "Нет объяснения";
       var reasoningEscaped = escapeHtml(reasoning);
-      html += '<tr>' +
+      var commentKey = dateStr + '_' + d.store_id + '_' + d.client_id;
+      var existingComment = userComments[commentKey] || '';
+      var existingCommentEscaped = escapeHtml(existingComment);
+      html += '<tr data-comment-key="' + commentKey + '">' +
         '<td>' + escapeHtml(d.store_id) + '</td>' +
         '<td>' + escapeHtml(d.client_id) + '</td>' +
         '<td>' + d.start_time + '</td>' +
@@ -692,12 +716,29 @@ AUDIO_PAGE_HTML = """<!doctype html>
         '<td>' + formatDuration(d.duration_sec) + '</td>' +
         '<td class="tooltip-cell" data-tooltip="' + reasoningEscaped + '">' + dialogType + '</td>' +
         '<td>' + saleResult + '</td>' +
+        '<td style="width: 300px;">' +
+          '<input type="text" class="comment-input" placeholder="Добавить комментарий..." value="' + existingCommentEscaped + '" data-comment-key="' + commentKey + '" />' +
+        '</td>' +
         '<td><a href="' + downloadUrl + '" class="btn">Скачать</a></td>' +
         '</tr>';
     }
 
     html += '</tbody></table>';
     tableContainer.innerHTML = html;
+    
+    // Attach event listeners to comment inputs
+    var inputs = tableContainer.querySelectorAll('.comment-input');
+    for (var j = 0; j < inputs.length; j++) {
+      inputs[j].addEventListener('blur', function(e) { saveCommentInput(e.target); });
+      inputs[j].addEventListener('change', function(e) { saveCommentInput(e.target); });
+      inputs[j].addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          saveCommentInput(e.target);
+          e.target.blur();
+        }
+      });
+    }
   }
 
   function getDialogTypeLabel(type) {
@@ -710,6 +751,40 @@ AUDIO_PAGE_HTML = """<!doctype html>
       "unknown": "Неизвестно"
     };
     return labels[type] || (type || "-");
+  }
+
+  var userComments = {};
+
+  function loadComments() {
+    fetch('/api/comments')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        userComments = data || {};
+      })
+      .catch(function() {
+        userComments = {};
+      });
+  }
+
+  function saveCommentInput(input) {
+    var commentKey = input.dataset.commentKey;
+    var comment = input.value.trim();
+    
+    if (comment && commentKey) {
+      userComments[commentKey] = comment;
+      input.style.borderColor = '#10b981';
+      input.style.backgroundColor = '#ecfdf5';
+      fetch('/api/comments', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({key: commentKey, comment: comment})
+      }).then(function() {
+        setTimeout(function() {
+          input.style.borderColor = '#e0e7ff';
+          input.style.backgroundColor = '#fafbff';
+        }, 1500);
+      }).catch(function() {});
+    }
   }
 
   function escapeHtml(text) {
@@ -792,6 +867,7 @@ AUDIO_PAGE_HTML = """<!doctype html>
 
   loadStores();
   loadDates();
+  loadComments();
 })();
 </script>
 </body>
@@ -1146,6 +1222,86 @@ def get_stores():
         return {"stores": stores}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get stores: {str(e)}")
+
+
+@app.get("/api/comments")
+def get_comments():
+    """Get all user comments"""
+    try:
+        if COMMENTS_FILE.exists():
+            with open(COMMENTS_FILE, "r", encoding="utf-8") as f:
+                comments = json.load(f)
+        else:
+            comments = {}
+        return comments
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get comments: {str(e)}")
+
+
+@app.post("/api/comments")
+def save_comment(comment_data: dict):
+    """Save a user comment"""
+    try:
+        key = comment_data.get("key")
+        comment = comment_data.get("comment")
+        if not key or not comment:
+            raise HTTPException(status_code=400, detail="Missing key or comment")
+        
+        if COMMENTS_FILE.exists():
+            with open(COMMENTS_FILE, "r", encoding="utf-8") as f:
+                comments = json.load(f)
+        else:
+            comments = {}
+        
+        comments[key] = comment
+        with open(COMMENTS_FILE, "w", encoding="utf-8") as f:
+            json.dump(comments, f, ensure_ascii=False, indent=2)
+        
+        return {"status": "ok"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save comment: {str(e)}")
+
+
+@app.get("/api/comments/export-gt")
+def export_comments_to_gt():
+    """Export comments to GT format for training"""
+    try:
+        if not COMMENTS_FILE.exists():
+            raise HTTPException(status_code=404, detail="No comments found")
+        
+        with open(COMMENTS_FILE, "r", encoding="utf-8") as f:
+            comments = json.load(f)
+        
+        if not comments:
+            raise HTTPException(status_code=404, detail="No comments to export")
+        
+        rows = []
+        for key, comment in comments.items():
+            parts = key.split("_")
+            if len(parts) >= 3:
+                date_str = parts[0]
+                store_id = parts[1]
+                client_id = "_".join(parts[2:])
+                rows.append({
+                    "date": date_str,
+                    "store_id": store_id,
+                    "client_id": client_id,
+                    "user_comment": comment,
+                })
+        
+        df = pd.DataFrame(rows)
+        output_file = REPORT_DIR / "comments_gt_export.xlsx"
+        df.to_excel(output_file, index=False)
+        
+        return FileResponse(
+            output_file,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            filename="comments_gt_export.xlsx"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to export comments: {str(e)}")
 
 
 @app.get("/api/reports/dates")
