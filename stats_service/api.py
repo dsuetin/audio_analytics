@@ -1152,42 +1152,48 @@ AUDIO_PAGE_HTML = """<!doctype html>
     return div.innerHTML;
   }
 
-  async function loadStores() {
-    try {
-      var response = await fetch("/api/stores");
-      if (!response.ok) {
-        throw new Error("Failed to load stores");
-      }
-      var data = await response.json();
-      storeSelect.innerHTML = '<option value="all">Все магазины</option>';
-      for (var i = 0; i < data.stores.length; i++) {
-        var option = document.createElement("option");
-        option.value = data.stores[i];
-        option.textContent = data.stores[i];
-        storeSelect.appendChild(option);
-      }
-    } catch (error) {
-      showError("Не удалось загрузить список магазинов: " + error.message);
-    }
+  function loadStores() {
+    return fetch("/api/stores")
+      .then(function(response) {
+        if (!response.ok) {
+          throw new Error("Failed to load stores");
+        }
+        return response.json();
+      })
+      .then(function(data) {
+        storeSelect.innerHTML = '<option value="all">Все магазины</option>';
+        for (var i = 0; i < data.stores.length; i++) {
+          var option = document.createElement("option");
+          option.value = data.stores[i];
+          option.textContent = data.stores[i];
+          storeSelect.appendChild(option);
+        }
+      })
+      .catch(function(error) {
+        showError("Не удалось загрузить список магазинов: " + error.message);
+      });
   }
 
-  async function loadDates() {
-    try {
-      var response = await fetch("/api/reports/dates");
-      if (!response.ok) {
-        throw new Error("Failed to load dates");
-      }
-      var data = await response.json();
-      dateSelect.innerHTML = "";
-      for (var i = 0; i < data.dates.length; i++) {
-        var option = document.createElement("option");
-        option.value = data.dates[i];
-        option.textContent = data.dates[i].split("-").reverse().join(".");
-        dateSelect.appendChild(option);
-      }
-    } catch (error) {
-      showError("Не удалось загрузить список дат: " + error.message);
-    }
+  function loadDates() {
+    return fetch("/api/reports/dates")
+      .then(function(response) {
+        if (!response.ok) {
+          throw new Error("Failed to load dates");
+        }
+        return response.json();
+      })
+      .then(function(data) {
+        dateSelect.innerHTML = "";
+        for (var i = 0; i < data.dates.length; i++) {
+          var option = document.createElement("option");
+          option.value = data.dates[i];
+          option.textContent = data.dates[i].split("-").reverse().join(".");
+          dateSelect.appendChild(option);
+        }
+      })
+      .catch(function(error) {
+        showError("Не удалось загрузить список дат: " + error.message);
+      });
   }
 
   async function loadReportData() {
@@ -1219,18 +1225,41 @@ AUDIO_PAGE_HTML = """<!doctype html>
   }
 
   dateSelect.addEventListener("change", function () {
+    localStorage.setItem("audio_date", dateSelect.value);
     loadReportData();
   });
 
-  storeSelect.addEventListener("change", loadReportData);
+  storeSelect.addEventListener("change", function () {
+    localStorage.setItem("audio_store", storeSelect.value);
+    loadReportData();
+  });
 
-  loadStores();
-  loadDates();
-  loadComments();
-  initModal();
+  async function initPage() {
+    await loadStores();
+    await loadDates();
+    loadComments();
+    initModal();
+    
+    // Restore saved date and store after loading options
+    var savedDate = localStorage.getItem("audio_date");
+    var savedStore = localStorage.getItem("audio_store");
+    if (savedDate && dateSelect.querySelector("[value='" + savedDate + "']")) {
+      dateSelect.value = savedDate;
+    }
+    if (savedStore && storeSelect.querySelector("[value='" + savedStore + "']")) {
+      storeSelect.value = savedStore;
+    }
+    
+    // Load report data if date is selected
+    if (dateSelect.value) {
+      loadReportData();
+    }
+    
+    // Make deleteManualDialog globally accessible
+    window.deleteManualDialog = deleteManualDialog;
+  }
   
-  // Make deleteManualDialog globally accessible
-  window.deleteManualDialog = deleteManualDialog;
+  initPage();
 })();
 </script>
 </body>
