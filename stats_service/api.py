@@ -868,8 +868,14 @@ AUDIO_PAGE_HTML = """<!doctype html>
       var d = dialogs[i];
       var isManual = d.is_manual === true;
       
-      if (i > 0 && storeId) {
-        html += '<button class="add-dialog-btn">+ Добавить диалог</button>';
+      if (storeId) {
+        if (i === 0) {
+          // Add button before first dialog
+          html += '<button class="add-dialog-btn">+ Добавить диалог</button>';
+        } else {
+          // Add button between dialogs
+          html += '<button class="add-dialog-btn">+ Добавить диалог</button>';
+        }
       }
       
       var dialogType = isManual ? d.dialog_type : getDialogTypeLabel(d.dialog_type);
@@ -910,7 +916,7 @@ AUDIO_PAGE_HTML = """<!doctype html>
               '<input type="text" class="comment-input" placeholder="Добавить комментарий..." value="' + existingCommentEscaped + '" data-comment-key="' + commentKey + '" />' +
             '</td>' +
             '<td><a href="' + downloadUrl + '" class="btn">▶ Play</a></td>' +
-            '<td><button class="delete-btn" data-manual-id="' + d.manual_id + '" onclick="deleteManualDialog(this.dataset.manualId)">Удалить</button></td>' +
+            '<td><button class="delete-btn" data-manual-id="' + d.manual_id + '" onclick="deleteManualDialog(this.dataset.manualId || this.getAttribute(&quot;data-manual-id&quot;))">Удалить</button></td>' +
           '</tr>' +
           '</tbody></table>';
       } else {
@@ -1222,6 +1228,9 @@ AUDIO_PAGE_HTML = """<!doctype html>
   loadDates();
   loadComments();
   initModal();
+  
+  // Make deleteManualDialog globally accessible
+  window.deleteManualDialog = deleteManualDialog;
 })();
 </script>
 </body>
