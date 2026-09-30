@@ -24,6 +24,7 @@ REPORT_DIR = Path(
 )
 
 COMMENTS_FILE = REPORT_DIR / "comments.json"
+MANUAL_DIALOGS_FILE = REPORT_DIR / "manual_dialogs.json"
 
 S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL", "http://localhost:9000")
 S3_ACCESS_KEY_ID = os.getenv("S3_ACCESS_KEY_ID", "minioadmin")
@@ -618,6 +619,152 @@ AUDIO_PAGE_HTML = """<!doctype html>
   .comment-input::placeholder {
     color: #94a3b8;
   }
+  .add-dialog-btn {
+    display: block;
+    width: 100%;
+    text-align: center;
+    padding: 6px;
+    margin: 4px 0;
+    background: linear-gradient(135deg, #f0f4ff 0%, #e8efff 100%);
+    color: #3b82f6;
+    border: 2px dashed #c7d2fe;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    transition: all 0.2s ease;
+  }
+  .add-dialog-btn:hover {
+    background: linear-gradient(135deg, #e8efff 0%, #dbeafe 100%);
+    border-color: #3b82f6;
+    transform: translateY(-1px);
+  }
+  .modal-overlay {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 10000;
+    align-items: center;
+    justify-content: center;
+  }
+  .modal-overlay.active {
+    display: flex;
+  }
+  .modal {
+    background: #fff;
+    border-radius: 16px;
+    padding: 24px;
+    width: 90%;
+    max-width: 500px;
+    max-height: 90vh;
+    overflow-y: auto;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+  }
+  .modal h2 {
+    margin: 0 0 20px;
+    color: #1a1a2e;
+    font-size: 20px;
+  }
+  .form-group {
+    margin-bottom: 16px;
+  }
+  .form-group label {
+    display: block;
+    margin-bottom: 6px;
+    color: #374151;
+    font-size: 13px;
+    font-weight: 500;
+  }
+  .form-group input,
+  .form-group textarea {
+    width: 100%;
+    padding: 10px 12px;
+    border: 2px solid #e5e7eb;
+    border-radius: 8px;
+    font-size: 14px;
+    transition: all 0.2s ease;
+    box-sizing: border-box;
+  }
+  .form-group input:focus,
+  .form-group textarea:focus {
+    outline: none;
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+  }
+  .form-group textarea {
+    min-height: 80px;
+    resize: vertical;
+  }
+  .modal-buttons {
+    display: flex;
+    gap: 12px;
+    margin-top: 20px;
+  }
+  .modal-buttons button {
+    flex: 1;
+    padding: 12px;
+    border: none;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+  }
+  .btn-primary {
+    background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+    color: #fff;
+  }
+  .btn-primary:hover {
+    background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
+    transform: translateY(-1px);
+  }
+  .btn-secondary {
+    background: #f3f4f6;
+    color: #374151;
+  }
+  .btn-secondary:hover {
+    background: #e5e7eb;
+  }
+  .error-message {
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    color: #dc2626;
+    padding: 12px;
+    border-radius: 8px;
+    font-size: 13px;
+    margin-bottom: 16px;
+    display: none;
+  }
+  .error-message.active {
+    display: block;
+  }
+  .manual-badge {
+    display: inline-block;
+    background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+    color: #fff;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    margin-left: 4px;
+  }
+  .delete-btn {
+    background: #fee2e2;
+    color: #dc2626;
+    border: none;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+  }
+  .delete-btn:hover {
+    background: #fecaca;
+  }
 </style>
 </head>
 <body>
@@ -639,14 +786,43 @@ AUDIO_PAGE_HTML = """<!doctype html>
          </div>
        </div>
 
-      <div id="table-container">
-        <div class="loading">
-          <div class="spinner"></div>
-          <div>Выберите дату для загрузки данных</div>
-        </div>
-      </div>
+       <div id="table-container">
+         <div class="loading">
+           <div class="spinner"></div>
+           <div>Выберите дату для загрузки данных</div>
+         </div>
+       </div>
 
-      <div class="alert" id="alert" role="alert"></div>
+       <div class="alert" id="alert" role="alert"></div>
+
+        <div class="modal-overlay" id="modal-overlay">
+          <div class="modal">
+            <h2>Добавить пропущенный диалог</h2>
+            <div class="error-message" id="modal-error"></div>
+            <form id="manual-dialog-form">
+              <div class="form-group">
+                <label for="manual-start-time">Начало сессии</label>
+                <input type="time" id="manual-start-time" required />
+              </div>
+              <div class="form-group">
+                <label for="manual-end-time">Конец сессии</label>
+                <input type="time" id="manual-end-time" required />
+              </div>
+              <div class="form-group">
+                <label for="manual-dialog-type">Цель миссии</label>
+                <textarea id="manual-dialog-type" placeholder="Например: Покупка товара" required></textarea>
+              </div>
+              <div class="form-group">
+                <label for="manual-result">Итог</label>
+                <textarea id="manual-result" placeholder="Например: Клиент совершил покупку" required></textarea>
+              </div>
+              <div class="modal-buttons">
+                <button type="button" class="btn-secondary" id="modal-cancel">Отмена</button>
+                <button type="submit" class="btn-primary">Сохранить</button>
+              </div>
+            </form>
+          </div>
+        </div>
 
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">
         <a href="/audio/time-range" class="nav-link">Скачать аудио по времени</a>
@@ -685,24 +861,19 @@ AUDIO_PAGE_HTML = """<!doctype html>
     }
 
     var dateStr = dateSelect.value;
-    var html = '<table><thead><tr>' +
-      '<th>Магазин</th>' +
-      '<th>Клиент</th>' +
-      '<th>Начало</th>' +
-      '<th>Конец</th>' +
-      '<th>Длительность</th>' +
-      '<th>Цель визита</th>' +
-      '<th>Результат</th>' +
-      '<th>Комментарий</th>' +
-      '<th>Аудио</th>' +
-      '</tr></thead><tbody>';
+    var storeId = storeSelect.value === "all" ? null : storeSelect.value;
+    var html = '<div style="display:flex;flex-direction:column;gap:4px;">';
 
     for (var i = 0; i < dialogs.length; i++) {
       var d = dialogs[i];
-      var sessionIdsEncoded = encodeURIComponent(d.session_ids.join(","));
-      var downloadUrl = "/api/audio/download-by-dialog?date_str=" + encodeURIComponent(dateStr) + "&session_ids=" + sessionIdsEncoded;
-      var dialogType = getDialogTypeLabel(d.dialog_type);
-      var saleResult = d.is_sale ? "Покупка" : "Нет покупки";
+      var isManual = d.is_manual === true;
+      
+      if (i > 0 && storeId) {
+        html += '<button class="add-dialog-btn">+ Добавить диалог</button>';
+      }
+      
+      var dialogType = isManual ? d.dialog_type : getDialogTypeLabel(d.dialog_type);
+      var saleResult = isManual ? d.result : (d.is_sale ? "Покупка" : "Нет покупки");
       var reasoning = d.model_reasoning || "Нет объяснения";
       var reasoningEscaped = escapeHtml(reasoning);
       var recognitionText = d.recognition_text || "Нет текста";
@@ -710,25 +881,76 @@ AUDIO_PAGE_HTML = """<!doctype html>
       var commentKey = dateStr + '_' + d.store_id + '_' + d.client_id;
       var existingComment = userComments[commentKey] || '';
       var existingCommentEscaped = escapeHtml(existingComment);
-      html += '<tr data-comment-key="' + commentKey + '">' +
-        '<td>' + escapeHtml(d.store_id) + '</td>' +
-        '<td>' + escapeHtml(d.client_id) + '</td>' +
-        '<td>' + d.start_time + '</td>' +
-        '<td>' + d.end_time + '</td>' +
-        '<td class="tooltip-cell" data-tooltip="' + recognitionTextEscaped + '">' + formatDuration(d.duration_sec) + '</td>' +
-        '<td class="tooltip-cell" data-tooltip="' + reasoningEscaped + '">' + dialogType + '</td>' +
-        '<td>' + saleResult + '</td>' +
-        '<td style="width: 300px;">' +
-          '<input type="text" class="comment-input" placeholder="Добавить комментарий..." value="' + existingCommentEscaped + '" data-comment-key="' + commentKey + '" />' +
-        '</td>' +
-        '<td><a href="' + downloadUrl + '" class="btn">Скачать</a></td>' +
-        '</tr>';
+      
+      if (isManual) {
+        var startTimeISO = dateStr + 'T' + d.start_time.replace(/:/g, ':');
+        var endTimeISO = dateStr + 'T' + d.end_time.replace(/:/g, ':');
+        var downloadUrl = "/audio/download?store=" + encodeURIComponent(d.store_id) + "&start_time=" + encodeURIComponent(startTimeISO) + "&end_time=" + encodeURIComponent(endTimeISO);
+        html += '<table style="margin:0;border:2px solid #3b82f6;border-radius:8px;overflow:hidden;"><thead style="background:#dbeafe;"><tr>' +
+          '<th>Магазин</th>' +
+          '<th>Клиент</th>' +
+          '<th>Начало</th>' +
+          '<th>Конец</th>' +
+          '<th>Длительность</th>' +
+          '<th>Цель визита</th>' +
+          '<th>Результат</th>' +
+          '<th>Комментарий</th>' +
+          '<th>Аудио</th>' +
+          '<th></th>' +
+          '</tr></thead><tbody>' +
+          '<tr data-comment-key="' + commentKey + '">' +
+            '<td>' + escapeHtml(d.store_id) + '</td>' +
+            '<td>Manual <span class="manual-badge">Ручной</span></td>' +
+            '<td>' + d.start_time + '</td>' +
+            '<td>' + d.end_time + '</td>' +
+            '<td class="tooltip-cell" data-tooltip="' + recognitionTextEscaped + '">' + formatDuration(0) + '</td>' +
+            '<td class="tooltip-cell" data-tooltip="' + reasoningEscaped + '">' + escapeHtml(dialogType) + '</td>' +
+            '<td>' + escapeHtml(saleResult) + '</td>' +
+            '<td style="width: 300px;">' +
+              '<input type="text" class="comment-input" placeholder="Добавить комментарий..." value="' + existingCommentEscaped + '" data-comment-key="' + commentKey + '" />' +
+            '</td>' +
+            '<td><a href="' + downloadUrl + '" class="btn">▶ Play</a></td>' +
+            '<td><button class="delete-btn" data-manual-id="' + d.manual_id + '" onclick="deleteManualDialog(this.dataset.manualId)">Удалить</button></td>' +
+          '</tr>' +
+          '</tbody></table>';
+      } else {
+        var sessionIdsEncoded = encodeURIComponent(d.session_ids.join(","));
+        var downloadUrl = "/api/audio/download-by-dialog?date_str=" + encodeURIComponent(dateStr) + "&session_ids=" + sessionIdsEncoded;
+        html += '<table style="margin:0;"><thead><tr>' +
+          '<th>Магазин</th>' +
+          '<th>Клиент</th>' +
+          '<th>Начало</th>' +
+          '<th>Конец</th>' +
+          '<th>Длительность</th>' +
+          '<th>Цель визита</th>' +
+          '<th>Результат</th>' +
+          '<th>Комментарий</th>' +
+          '<th>Аудио</th>' +
+          '</tr></thead><tbody>' +
+          '<tr data-comment-key="' + commentKey + '">' +
+            '<td>' + escapeHtml(d.store_id) + '</td>' +
+            '<td>' + escapeHtml(d.client_id) + '</td>' +
+            '<td>' + d.start_time + '</td>' +
+            '<td>' + d.end_time + '</td>' +
+            '<td class="tooltip-cell" data-tooltip="' + recognitionTextEscaped + '">' + formatDuration(d.duration_sec) + '</td>' +
+            '<td class="tooltip-cell" data-tooltip="' + reasoningEscaped + '">' + dialogType + '</td>' +
+            '<td>' + saleResult + '</td>' +
+            '<td style="width: 300px;">' +
+              '<input type="text" class="comment-input" placeholder="Добавить комментарий..." value="' + existingCommentEscaped + '" data-comment-key="' + commentKey + '" />' +
+            '</td>' +
+            '<td><a href="' + downloadUrl + '" class="btn">Скачать</a></td>' +
+          '</tr>' +
+          '</tbody></table>';
+      }
     }
-
-    html += '</tbody></table>';
+    
+    if (storeId) {
+      html += '<button class="add-dialog-btn">+ Добавить диалог</button>';
+    }
+    
+    html += '</div>';
     tableContainer.innerHTML = html;
     
-    // Attach event listeners to comment inputs
     var inputs = tableContainer.querySelectorAll('.comment-input');
     for (var j = 0; j < inputs.length; j++) {
       inputs[j].addEventListener('blur', function(e) { saveCommentInput(e.target); });
@@ -740,6 +962,11 @@ AUDIO_PAGE_HTML = """<!doctype html>
           e.target.blur();
         }
       });
+    }
+    
+    var addButtons = tableContainer.querySelectorAll('.add-dialog-btn');
+    for (var k = 0; k < addButtons.length; k++) {
+      addButtons[k].addEventListener('click', openAddDialogModal);
     }
   }
 
@@ -787,6 +1014,130 @@ AUDIO_PAGE_HTML = """<!doctype html>
         }, 1500);
       }).catch(function() {});
     }
+  }
+
+  var modalOverlay = null;
+  var modalError = null;
+  var manualForm = null;
+
+  function initModal() {
+    modalOverlay = document.getElementById('modal-overlay');
+    modalError = document.getElementById('modal-error');
+    manualForm = document.getElementById('manual-dialog-form');
+    
+    document.getElementById('modal-cancel').addEventListener('click', closeModal);
+    modalOverlay.addEventListener('click', function(e) {
+      if (e.target === modalOverlay) {
+        closeModal();
+      }
+    });
+    
+    manualForm.addEventListener('submit', function(e) {
+      e.preventDefault();
+      saveManualDialog();
+    });
+  }
+
+  function openAddDialogModal() {
+    if (!modalOverlay) {
+      initModal();
+    }
+    modalError.classList.remove('active');
+    modalError.textContent = '';
+    manualForm.reset();
+    modalOverlay.classList.add('active');
+  }
+
+  function closeModal() {
+    if (modalOverlay) {
+      modalOverlay.classList.remove('active');
+    }
+  }
+
+  function saveManualDialog() {
+    var dateStr = dateSelect.value;
+    var storeId = storeSelect.value;
+    
+    if (!dateStr || !storeId || storeId === "all") {
+      showModalError('Выберите дату и магазин');
+      return;
+    }
+    
+    var startTimeInput = document.getElementById('manual-start-time').value;
+    var endTimeInput = document.getElementById('manual-end-time').value;
+    var dialogType = document.getElementById('manual-dialog-type').value.trim();
+    var result = document.getElementById('manual-result').value.trim();
+    
+    if (!startTimeInput || !endTimeInput || !dialogType || !result) {
+      showModalError('Все поля обязательны');
+      return;
+    }
+    
+    // Parse time strings (HH:MM:SS or HH:MM)
+    var startParts = startTimeInput.split(':');
+    var endParts = endTimeInput.split(':');
+    
+    var startMinutes = parseInt(startParts[0]) * 60 + parseInt(startParts[1]) + (startParts[2] ? parseInt(startParts[2]) / 60 : 0);
+    var endMinutes = parseInt(endParts[0]) * 60 + parseInt(endParts[1]) + (endParts[2] ? parseInt(endParts[2]) / 60 : 0);
+    
+    if (startMinutes >= endMinutes) {
+      showModalError('Время начала должно быть раньше времени окончания');
+      return;
+    }
+    
+    var startTime = startTimeInput;
+    var endTime = endTimeInput;
+    
+    fetch('/api/manual-dialogs', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        date: dateStr,
+        store_id: storeId,
+        start_time: startTime,
+        end_time: endTime,
+        dialog_type: dialogType,
+        result: result
+      })
+    }).then(function(response) {
+      return response.json().then(function(data) {
+        return {response: response, data: data};
+      });
+    }).then(function(res) {
+      if (res.response.ok) {
+        closeModal();
+        loadReportData();
+      } else {
+        showModalError(res.data.detail || 'Ошибка при сохранении');
+      }
+    }).catch(function(err) {
+      showModalError('Ошибка: ' + err.message);
+    });
+  }
+
+  function showModalError(message) {
+    modalError.textContent = message;
+    modalError.classList.add('active');
+  }
+
+  function deleteManualDialog(dialogId) {
+    if (!confirm('Удалить этот ручной диалог?')) {
+      return;
+    }
+    
+    fetch('/api/manual-dialogs/' + encodeURIComponent(dialogId), {
+      method: 'DELETE'
+    }).then(function(response) {
+      return response.json();
+    }).then(function(data) {
+      if (data.status === 'ok') {
+        loadReportData();
+      } else {
+        alert('Ошибка при удалении: ' + (data.detail || 'Неизвестная ошибка'));
+      }
+    }).catch(function(err) {
+      alert('Ошибка: ' + err.message);
+    });
   }
 
   function escapeHtml(text) {
@@ -870,6 +1221,7 @@ AUDIO_PAGE_HTML = """<!doctype html>
   loadStores();
   loadDates();
   loadComments();
+  initModal();
 })();
 </script>
 </body>
@@ -1306,6 +1658,143 @@ def export_comments_to_gt():
         raise HTTPException(status_code=500, detail=f"Failed to export comments: {str(e)}")
 
 
+def load_manual_dialogs():
+    """Load manual dialogs from JSON file"""
+    if MANUAL_DIALOGS_FILE.exists():
+        with open(MANUAL_DIALOGS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return []
+
+
+def save_manual_dialogs(dialogs):
+    """Save manual dialogs to JSON file"""
+    MANUAL_DIALOGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(MANUAL_DIALOGS_FILE, "w", encoding="utf-8") as f:
+        json.dump(dialogs, f, ensure_ascii=False, indent=2)
+
+
+def parse_time_to_minutes(time_str):
+    """Parse time string (HH:MM or HH:MM:SS) to minutes from midnight"""
+    parts = time_str.split(':')
+    hours = int(parts[0])
+    minutes = int(parts[1])
+    seconds = int(parts[2]) if len(parts) > 2 else 0
+    return hours * 60 + minutes + seconds / 60
+
+def check_time_overlap(start_time_str, end_time_str, existing_dialogs, date_str, store_id):
+    """
+    Check if new dialog time overlaps with existing dialogs.
+    Returns (is_valid, error_message)
+    """
+    try:
+        new_start = parse_time_to_minutes(start_time_str)
+        new_end = parse_time_to_minutes(end_time_str)
+    except (ValueError, IndexError):
+        return False, "Неверный формат времени. Используйте HH:MM или HH:MM:SS"
+    
+    if new_start >= new_end:
+        return False, "Время начала должно быть раньше времени окончания"
+    
+    for dialog in existing_dialogs:
+        if dialog.get("date") != date_str or dialog.get("store_id") != store_id:
+            continue
+        
+        try:
+            existing_start = parse_time_to_minutes(dialog["start_time"])
+            existing_end = parse_time_to_minutes(dialog["end_time"])
+        except (ValueError, KeyError, IndexError):
+            continue
+        
+        if new_start < existing_end and new_end > existing_start:
+            return False, f"Интервал пересекается с существующей сессией: {dialog['start_time']} — {dialog['end_time']}"
+    
+    return True, None
+
+
+@app.get("/api/manual-dialogs")
+def get_manual_dialogs(
+    date: str = Query(None, description="Filter by date (YYYY-MM-DD)"),
+    store: str = Query(None, description="Filter by store"),
+):
+    """Get manual dialogs with optional filters"""
+    try:
+        dialogs = load_manual_dialogs()
+        
+        if date:
+            dialogs = [d for d in dialogs if d.get("date") == date]
+        if store:
+            dialogs = [d for d in dialogs if d.get("store_id") == store]
+        
+        return {"dialogs": dialogs}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get manual dialogs: {str(e)}")
+
+
+@app.post("/api/manual-dialogs")
+def create_manual_dialog(dialog_data: dict):
+    """Create a new manual dialog"""
+    try:
+        required_fields = ["date", "store_id", "start_time", "end_time", "dialog_type", "result"]
+        for field in required_fields:
+            if field not in dialog_data or not dialog_data[field]:
+                raise HTTPException(status_code=400, detail=f"Обязательное поле отсутствует: {field}")
+        
+        date_str = dialog_data["date"]
+        store_id = dialog_data["store_id"]
+        start_time_input = dialog_data["start_time"]
+        end_time_input = dialog_data["end_time"]
+        
+        # Normalize time format to HH:MM:SS
+        def normalize_time(time_str):
+            parts = time_str.split(':')
+            if len(parts) == 2:
+                return time_str + ':00'
+            return time_str
+        
+        start_time = normalize_time(start_time_input)
+        end_time = normalize_time(end_time_input)
+        
+        existing_dialogs = load_manual_dialogs()
+        
+        is_valid, error_msg = check_time_overlap(start_time, end_time, existing_dialogs, date_str, store_id)
+        if not is_valid:
+            raise HTTPException(status_code=400, detail=error_msg)
+        
+        import uuid
+        new_dialog = {
+            "id": str(uuid.uuid4()),
+            "date": date_str,
+            "store_id": store_id,
+            "start_time": start_time,
+            "end_time": end_time,
+            "dialog_type": dialog_data["dialog_type"],
+            "result": dialog_data["result"],
+            "is_manual": True,
+            "created_at": datetime.now().isoformat(),
+        }
+        
+        existing_dialogs.append(new_dialog)
+        save_manual_dialogs(existing_dialogs)
+        
+        return {"status": "ok", "dialog": new_dialog}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create manual dialog: {str(e)}")
+
+
+@app.delete("/api/manual-dialogs/{dialog_id}")
+def delete_manual_dialog(dialog_id: str):
+    """Delete a manual dialog"""
+    try:
+        dialogs = load_manual_dialogs()
+        dialogs = [d for d in dialogs if d.get("id") != dialog_id]
+        save_manual_dialogs(dialogs)
+        return {"status": "ok"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete manual dialog: {str(e)}")
+
+
 @app.get("/api/reports/dates")
 def get_reports_dates():
     """Get list of available report dates"""
@@ -1372,6 +1861,31 @@ def get_report_data(
     # Get unique stores and clients from filtered data
     stores = df["store_id"].unique().tolist() if "store_id" in df.columns else []
     clients = df["client_id"].unique().tolist() if "client_id" in df.columns else []
+
+    # Add manual dialogs for this date and store
+    manual_dialogs = load_manual_dialogs()
+    for md in manual_dialogs:
+        if md.get("date") == date_str:
+            if not store_filter or md.get("store_id") == store_filter:
+                dialogs.append({
+                    "client_id": "Manual",
+                    "store_id": md.get("store_id"),
+                    "seller_id": "",
+                    "start_time": md.get("start_time"),
+                    "end_time": md.get("end_time"),
+                    "duration_sec": 0,
+                    "session_ids": [],
+                    "is_sale": md.get("result") == "Покупка",
+                    "dialog_type": md.get("dialog_type"),
+                    "model_reasoning": "Ручной диалог",
+                    "recognition_text": "",
+                    "is_manual": True,
+                    "manual_id": md.get("id"),
+                    "result": md.get("result"),
+                })
+
+    # Sort all dialogs by start_time
+    dialogs.sort(key=lambda x: x.get("start_time", ""))
 
     return {
         "date": date_str,
