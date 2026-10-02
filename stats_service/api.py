@@ -100,6 +100,18 @@ def get_session_time_minutes(session_id: str):
         return None
 
 
+def get_session_time_seconds(session_id: str):
+    """Extract time from session_id and convert to seconds from midnight"""
+    try:
+        time_part = session_id.split("-")[1]
+        hours = int(time_part[:2])
+        minutes = int(time_part[2:4])
+        seconds = int(time_part[4:6]) if len(time_part) >= 6 else 0
+        return hours * 3600 + minutes * 60 + seconds
+    except (IndexError, ValueError):
+        return None
+
+
 def download_session_chunks(s3_client, session_id: str) -> bytes:
     """Download all chunks for a session, extract PCM from each, and concatenate
     
@@ -783,6 +795,25 @@ AUDIO_PAGE_HTML = """<!doctype html>
   .delete-btn:hover {
     background: #fecaca;
   }
+  .edit-btn {
+    background: #fef3c7;
+    color: #d97706;
+    border: none;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    margin-right: 4px;
+  }
+  .edit-btn:hover {
+    background: #fde68a;
+  }
+  .action-buttons {
+    display: flex;
+    gap: 2px;
+    align-items: center;
+  }
 </style>
 </head>
 <body>
@@ -820,11 +851,11 @@ AUDIO_PAGE_HTML = """<!doctype html>
             <form id="manual-dialog-form">
               <div class="form-group">
                 <label for="manual-start-time">Начало сессии</label>
-                <input type="time" id="manual-start-time" required />
+                <input type="time" id="manual-start-time" step="1" required />
               </div>
               <div class="form-group">
                 <label for="manual-end-time">Конец сессии</label>
-                <input type="time" id="manual-end-time" required />
+                <input type="time" id="manual-end-time" step="1" required />
               </div>
               <div class="form-group">
                 <label for="manual-dialog-type">Цель миссии</label>
@@ -934,7 +965,10 @@ AUDIO_PAGE_HTML = """<!doctype html>
               '<input type="text" class="comment-input" placeholder="Добавить комментарий..." value="' + existingCommentEscaped + '" data-comment-key="' + commentKey + '" />' +
             '</td>' +
             '<td><a href="' + downloadUrl + '" class="btn">▶ Play</a></td>' +
-            '<td><button class="delete-btn" data-manual-id="' + d.manual_id + '" onclick="deleteManualDialog(this.dataset.manualId || this.getAttribute(&quot;data-manual-id&quot;))">Удалить</button></td>' +
+            '<td><div class="action-buttons">' +
+              '<button class="edit-btn" data-manual-id="' + d.manual_id + '" onclick="editManualDialog(this.dataset.manualId || this.getAttribute(&quot;data-manual-id&quot;))" title="Изменить">✏️</button>' +
+              '<button class="delete-btn" data-manual-id="' + d.manual_id + '" onclick="deleteManualDialog(this.dataset.manualId || this.getAttribute(&quot;data-manual-id&quot;))" title="Удалить">❌</button>' +
+            '</div></td>' +
           '</tr>' +
           '</tbody></table>';
        } else {
@@ -1093,6 +1127,8 @@ AUDIO_PAGE_HTML = """<!doctype html>
     });
   }
 
+  var editingDialogId = null;
+
   function openAddDialogModal() {
     if (!modalOverlay) {
       initModal();
@@ -1100,12 +1136,52 @@ AUDIO_PAGE_HTML = """<!doctype html>
     modalError.classList.remove('active');
     modalError.textContent = '';
     manualForm.reset();
+    editingDialogId = null;
+    document.querySelector('.modal h2').textContent = 'Добавить пропущенный диалог';
+    modalOverlay.classList.add('active');
+  }
+
+  function editManualDialog(dialogId) {
+    if (!modalOverlay) {
+      initModal();
+    }
+    
+    // Find the dialog to edit
+    var dialogs = currentData ? currentData.dialogs : [];
+    var dialogToEdit = null;
+    for (var i = 0; i < dialogs.length; i++) {
+      if (dialogs[i].manual_id === dialogId) {
+        dialogToEdit = dialogs[i];
+        break;
+      }
+    }
+    
+    if (!dialogToEdit) {
+      showModalError('Диалог не найден');
+      return;
+    }
+    
+    // Fill the form with existing values
+    modalError.classList.remove('active');
+    modalError.textContent = '';
+    
+    // Set time values (format: HH:MM:SS)
+    document.getElementById('manual-start-time').value = dialogToEdit.start_time;
+    document.getElementById('manual-end-time').value = dialogToEdit.end_time;
+    document.getElementById('manual-dialog-type').value = dialogToEdit.dialog_type;
+    document.getElementById('manual-result').value = dialogToEdit.result;
+    
+    // Set editing mode
+    editingDialogId = dialogId;
+    document.querySelector('.modal h2').textContent = 'Редактировать диалог';
+    
     modalOverlay.classList.add('active');
   }
 
   function closeModal() {
     if (modalOverlay) {
       modalOverlay.classList.remove('active');
+      editingDialogId = null;
     }
   }
 
@@ -1143,31 +1219,62 @@ AUDIO_PAGE_HTML = """<!doctype html>
     var startTime = startTimeInput;
     var endTime = endTimeInput;
     
-    fetch('/api/manual-dialogs', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        date: dateStr,
-        store_id: storeId,
-        start_time: startTime,
-        end_time: endTime,
-        dialog_type: dialogType,
-        result: result
-      })
-    }).then(function(response) {
-      return response.json().then(function(data) {
-        return {response: response, data: data};
+    // Check if we're editing or creating
+    if (editingDialogId) {
+      // Update existing dialog
+      fetch('/api/manual-dialogs/' + encodeURIComponent(editingDialogId), {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          date: dateStr,
+          store_id: storeId,
+          start_time: startTime,
+          end_time: endTime,
+          dialog_type: dialogType,
+          result: result
+        })
+      }).then(function(response) {
+        return response.json().then(function(data) {
+          return {response: response, data: data};
+        });
+      }).then(function(res) {
+        if (res.response.ok) {
+          closeModal();
+          loadReportData();
+        } else {
+          showModalError(res.data.detail || 'Ошибка при сохранении');
+        }
+      }).catch(function(err) {
+        showModalError('Ошибка: ' + err.message);
       });
-    }).then(function(res) {
-      if (res.response.ok) {
-        closeModal();
-        loadReportData();
-      } else {
-        showModalError(res.data.detail || 'Ошибка при сохранении');
-      }
-    }).catch(function(err) {
-      showModalError('Ошибка: ' + err.message);
-    });
+    } else {
+      // Create new dialog
+      fetch('/api/manual-dialogs', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          date: dateStr,
+          store_id: storeId,
+          start_time: startTime,
+          end_time: endTime,
+          dialog_type: dialogType,
+          result: result
+        })
+      }).then(function(response) {
+        return response.json().then(function(data) {
+          return {response: response, data: data};
+        });
+      }).then(function(res) {
+        if (res.response.ok) {
+          closeModal();
+          loadReportData();
+        } else {
+          showModalError(res.data.detail || 'Ошибка при сохранении');
+        }
+      }).catch(function(err) {
+        showModalError('Ошибка: ' + err.message);
+      });
+    }
   }
 
   function showModalError(message) {
@@ -1306,6 +1413,7 @@ AUDIO_PAGE_HTML = """<!doctype html>
     
     // Make deleteManualDialog globally accessible
     window.deleteManualDialog = deleteManualDialog;
+    window.editManualDialog = editManualDialog;
   }
   
   initPage();
@@ -1451,10 +1559,10 @@ AUDIO_TIME_RANGE_HTML = """<!doctype html>
         <select id="store-select" required></select>
 
         <label for="start_time">Время начала</label>
-        <input type="datetime-local" id="start_time" name="start_time" required>
+        <input type="datetime-local" id="start_time" name="start_time" step="1" required>
 
         <label for="end_time">Время окончания</label>
-        <input type="datetime-local" id="end_time" name="end_time" required>
+        <input type="datetime-local" id="end_time" name="end_time" step="1" required>
 
         <button type="submit" id="submit-btn">
           <span class="spinner" id="spinner" hidden></span>
@@ -1870,6 +1978,63 @@ def create_manual_dialog(dialog_data: dict):
         raise HTTPException(status_code=500, detail=f"Failed to create manual dialog: {str(e)}")
 
 
+@app.put("/api/manual-dialogs/{dialog_id}")
+def update_manual_dialog(dialog_id: str, dialog_data: dict):
+    """Update a manual dialog"""
+    try:
+        required_fields = ["date", "store_id", "start_time", "end_time", "dialog_type", "result"]
+        for field in required_fields:
+            if field not in dialog_data or not dialog_data[field]:
+                raise HTTPException(status_code=400, detail=f"Обязательное поле отсутствует: {field}")
+        
+        dialogs = load_manual_dialogs()
+        
+        # Find the dialog to update
+        dialog_to_update = None
+        for dialog in dialogs:
+            if dialog.get("id") == dialog_id:
+                dialog_to_update = dialog
+                break
+        
+        if not dialog_to_update:
+            raise HTTPException(status_code=404, detail="Manual dialog not found")
+        
+        date_str = dialog_data["date"]
+        store_id = dialog_data["store_id"]
+        start_time_input = dialog_data["start_time"]
+        end_time_input = dialog_data["end_time"]
+        
+        # Normalize time format to HH:MM:SS
+        def normalize_time(time_str):
+            parts = time_str.split(':')
+            if len(parts) == 2:
+                return time_str + ':00'
+            return time_str
+        
+        start_time = normalize_time(start_time_input)
+        end_time = normalize_time(end_time_input)
+        
+        # Check overlap with other dialogs (excluding the one being updated)
+        other_dialogs = [d for d in dialogs if d.get("id") != dialog_id]
+        is_valid, error_msg = check_time_overlap(start_time, end_time, other_dialogs, date_str, store_id)
+        if not is_valid:
+            raise HTTPException(status_code=400, detail=error_msg)
+        
+        # Update the dialog
+        dialog_to_update["start_time"] = start_time
+        dialog_to_update["end_time"] = end_time
+        dialog_to_update["dialog_type"] = dialog_data["dialog_type"]
+        dialog_to_update["result"] = dialog_data["result"]
+        
+        save_manual_dialogs(dialogs)
+        
+        return {"status": "ok", "dialog": dialog_to_update}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update manual dialog: {str(e)}")
+
+
 @app.delete("/api/manual-dialogs/{dialog_id}")
 def delete_manual_dialog(dialog_id: str):
     """Delete a manual dialog"""
@@ -1995,8 +2160,8 @@ def download_audio(
         raise HTTPException(status_code=400, detail="start_time must be before end_time")
 
     date_str = start_time.strftime("%Y%m%d")
-    start_minutes = start_time.hour * 60 + start_time.minute
-    end_minutes = end_time.hour * 60 + end_time.minute
+    start_seconds = start_time.hour * 3600 + start_time.minute * 60 + start_time.second
+    end_seconds = end_time.hour * 3600 + end_time.minute * 60 + end_time.second
 
     s3_client = get_s3_client()
 
@@ -2004,14 +2169,14 @@ def download_audio(
 
     filtered_sessions = []
     for session in all_sessions:
-        session_minutes = get_session_time_minutes(session)
-        if session_minutes is not None and start_minutes <= session_minutes < end_minutes:
+        session_seconds = get_session_time_seconds(session)
+        if session_seconds is not None and start_seconds <= session_seconds < end_seconds:
             filtered_sessions.append(session)
 
     if not filtered_sessions:
         raise HTTPException(
             status_code=404,
-            detail=f"No audio sessions found for store '{store}' in time range {start_time.strftime('%H:%M')} - {end_time.strftime('%H:%M')}",
+            detail=f"No audio sessions found for store '{store}' in time range {start_time.strftime('%H:%M:%S')} - {end_time.strftime('%H:%M:%S')}",
         )
 
     all_audio_data = []
@@ -2036,7 +2201,7 @@ def download_audio(
             filename_ascii += char
         else:
             filename_ascii += "_"
-    filename = f"audio_{date_str}_{filename_ascii}_{start_time.strftime('%H-%M')}_to_{end_time.strftime('%H-%M')}.wav"
+    filename = f"audio_{date_str}_{filename_ascii}_{start_time.strftime('%H-%M-%S')}_to_{end_time.strftime('%H-%M-%S')}.wav"
 
     return Response(
         content=audio_buffer.read(),
