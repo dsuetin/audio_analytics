@@ -10,7 +10,7 @@ import json
 from typing import Optional
 import pandas as pd
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Form
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from stats_service.stores import get_all_stores
 
@@ -919,35 +919,33 @@ AUDIO_PAGE_HTML = """<!doctype html>
             '<td><button class="delete-btn" data-manual-id="' + d.manual_id + '" onclick="deleteManualDialog(this.dataset.manualId || this.getAttribute(&quot;data-manual-id&quot;))">Удалить</button></td>' +
           '</tr>' +
           '</tbody></table>';
-      } else {
-        var sessionIdsEncoded = encodeURIComponent(d.session_ids.join(","));
-        var downloadUrl = "/api/audio/download-by-dialog?date_str=" + encodeURIComponent(dateStr) + "&session_ids=" + sessionIdsEncoded;
-        html += '<table style="margin:0;"><thead><tr>' +
-          '<th>Магазин</th>' +
-          '<th>Клиент</th>' +
-          '<th>Начало</th>' +
-          '<th>Конец</th>' +
-          '<th>Длительность</th>' +
-          '<th>Цель визита</th>' +
-          '<th>Результат</th>' +
-          '<th>Комментарий</th>' +
-          '<th>Аудио</th>' +
-          '</tr></thead><tbody>' +
-          '<tr data-comment-key="' + commentKey + '">' +
-            '<td>' + escapeHtml(d.store_id) + '</td>' +
-            '<td>' + escapeHtml(d.client_id) + '</td>' +
-            '<td>' + d.start_time + '</td>' +
-            '<td>' + d.end_time + '</td>' +
-            '<td class="tooltip-cell" data-tooltip="' + recognitionTextEscaped + '">' + formatDuration(d.duration_sec) + '</td>' +
-            '<td class="tooltip-cell" data-tooltip="' + reasoningEscaped + '">' + dialogType + '</td>' +
-            '<td>' + saleResult + '</td>' +
-            '<td style="width: 300px;">' +
-              '<input type="text" class="comment-input" placeholder="Добавить комментарий..." value="' + existingCommentEscaped + '" data-comment-key="' + commentKey + '" />' +
-            '</td>' +
-            '<td><a href="' + downloadUrl + '" class="btn">Скачать</a></td>' +
-          '</tr>' +
-          '</tbody></table>';
-      }
+       } else {
+         html += '<table style="margin:0;"><thead><tr>' +
+           '<th>Магазин</th>' +
+           '<th>Клиент</th>' +
+           '<th>Начало</th>' +
+           '<th>Конец</th>' +
+           '<th>Длительность</th>' +
+           '<th>Цель визита</th>' +
+           '<th>Результат</th>' +
+           '<th>Комментарий</th>' +
+           '<th>Аудио</th>' +
+           '</tr></thead><tbody>' +
+           '<tr data-comment-key="' + commentKey + '">' +
+             '<td>' + escapeHtml(d.store_id) + '</td>' +
+             '<td>' + escapeHtml(d.client_id) + '</td>' +
+             '<td>' + d.start_time + '</td>' +
+             '<td>' + d.end_time + '</td>' +
+             '<td class="tooltip-cell" data-tooltip="' + recognitionTextEscaped + '">' + formatDuration(d.duration_sec) + '</td>' +
+             '<td class="tooltip-cell" data-tooltip="' + reasoningEscaped + '">' + dialogType + '</td>' +
+             '<td>' + saleResult + '</td>' +
+             '<td style="width: 300px;">' +
+               '<input type="text" class="comment-input" placeholder="Добавить комментарий..." value="' + existingCommentEscaped + '" data-comment-key="' + commentKey + '" />' +
+             '</td>' +
+             '<td><button class="btn download-dialog-btn" data-date="' + escapeHtml(dateStr) + '" data-session-ids="' + escapeHtml(d.session_ids.join(",")) + '">Скачать</button></td>' +
+           '</tr>' +
+           '</tbody></table>';
+       }
     }
     
     if (storeId) {
@@ -973,6 +971,39 @@ AUDIO_PAGE_HTML = """<!doctype html>
     var addButtons = tableContainer.querySelectorAll('.add-dialog-btn');
     for (var k = 0; k < addButtons.length; k++) {
       addButtons[k].addEventListener('click', openAddDialogModal);
+    }
+    
+    var downloadButtons = tableContainer.querySelectorAll('.download-dialog-btn');
+    for (var m = 0; m < downloadButtons.length; m++) {
+      downloadButtons[m].addEventListener('click', function(e) {
+        e.preventDefault();
+        var date = this.dataset.date;
+        var sessionIds = this.dataset.sessionIds;
+        var formData = new FormData();
+        formData.append('date_str', date);
+        formData.append('session_ids', sessionIds);
+        fetch('/api/audio/download-by-dialog', {
+          method: 'POST',
+          body: formData
+        })
+        .then(function(r) {
+          if (r.ok) {
+            return r.blob();
+          }
+          throw new Error('Download failed: ' + r.status);
+        })
+        .then(function(blob) {
+          var url = window.URL.createObjectURL(blob);
+          var a = document.createElement('a');
+          a.href = url;
+          a.download = 'audio_' + date + '_dialog.wav';
+          a.click();
+          window.URL.revokeObjectURL(url);
+        })
+        .catch(function(err) {
+          alert('Ошибка скачивания: ' + err.message);
+        });
+      });
     }
   }
 
@@ -1996,10 +2027,10 @@ def download_audio(
     )
 
 
-@app.get("/api/audio/download-by-dialog")
+@app.post("/api/audio/download-by-dialog")
 def download_audio_by_dialog(
-    date_str: str = Query(..., description="Date in YYYY-MM-DD format"),
-    session_ids: str = Query(..., description="Comma-separated session IDs"),
+    date_str: str = Form(..., description="Date in YYYY-MM-DD format"),
+    session_ids: str = Form(..., description="Comma-separated session IDs"),
 ):
     """Download audio for a specific dialog by session IDs"""
     # Parse session IDs
