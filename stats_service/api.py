@@ -101,28 +101,46 @@ def get_session_time_minutes(session_id: str):
 
 
 def download_session_chunks(s3_client, session_id: str) -> bytes:
-    """Download all chunks for a session, extract PCM from each, and concatenate"""
+    """Download all chunks for a session, extract PCM from each, and concatenate
+    
+    Uses proper WAV parsing with wave.readframes() to handle all WAV metadata chunks correctly.
+    Sorts chunks by numeric index (e.g., 000001.wav, 000002.wav) not by full S3 key.
+    """
+    import re
+    
     session_prefix = f"audio/{session_id}/"
-    session_files = []
+    chunk_files = []
 
     paginator = s3_client.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=S3_BUCKET, Prefix=session_prefix):
         if "Contents" in page:
-            session_files.extend([obj["Key"] for obj in page["Contents"]])
+            for obj in page["Contents"]:
+                key = obj["Key"]
+                parts = key.split("/")
+                if len(parts) >= 3:
+                    filename = parts[2]
+                    if re.fullmatch(r"\d+\.wav", filename):
+                        chunk_files.append((filename, key))
 
-    session_files = sorted(session_files)
+    chunk_files.sort(key=lambda x: int(os.path.splitext(x[0])[0]))
     all_audio_data = b""
 
-    for chunk_key in session_files:
+    for filename, chunk_key in chunk_files:
         try:
             obj = s3_client.get_object(Bucket=S3_BUCKET, Key=chunk_key)
             chunk_data = obj["Body"].read()
-            if len(chunk_data) > 44 and chunk_data[:4] == b"RIFF":
-                pcm_data = chunk_data[44:]
-            else:
-                pcm_data = chunk_data
-            all_audio_data += pcm_data
-        except Exception:
+            
+            with io.BytesIO(chunk_data) as bio, wave.open(bio, "rb") as wf:
+                params = (wf.getnchannels(), wf.getframerate(), wf.getsampwidth())
+                if params != (1, 16000, 2):
+                    print(f"Warning: {session_id}/{filename}: unexpected params {params}")
+                n = wf.getnframes()
+                pcm_data = wf.readframes(n)
+                if len(pcm_data) != n * 1 * 2:
+                    print(f"Warning: {session_id}/{filename}: data length mismatch")
+                all_audio_data += pcm_data
+        except Exception as e:
+            print(f"Error reading {chunk_key}: {e}")
             pass
 
     return all_audio_data
