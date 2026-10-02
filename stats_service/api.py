@@ -551,6 +551,47 @@ AUDIO_PAGE_HTML = """<!doctype html>
   }
   .btn:hover:not(:disabled) { background: var(--accent-hover); }
   .btn:disabled { opacity: 0.7; cursor: not-allowed; }
+  .audio-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .audio-progress {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .progress-time, .progress-duration {
+    min-width: 45px;
+  }
+  .progress-slider {
+    flex: 1;
+    height: 4px;
+    -webkit-appearance: none;
+    appearance: none;
+    background: var(--border);
+    border-radius: 2px;
+    outline: none;
+  }
+  .progress-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 12px;
+    height: 12px;
+    background: var(--accent);
+    border-radius: 50%;
+    cursor: pointer;
+  }
+  .progress-slider::-moz-range-thumb {
+    width: 12px;
+    height: 12px;
+    background: var(--accent);
+    border-radius: 50%;
+    cursor: pointer;
+    border: none;
+  }
   .alert {
     display: none;
     padding: 12px 14px;
@@ -1077,10 +1118,7 @@ AUDIO_PAGE_HTML = """<!doctype html>
       var existingComment = userComments[commentKey] || '';
       var existingCommentEscaped = escapeHtml(existingComment);
       
-      if (isManual) {
-        var startTimeISO = dateStr + 'T' + d.start_time.replace(/:/g, ':');
-        var endTimeISO = dateStr + 'T' + d.end_time.replace(/:/g, ':');
-        var downloadUrl = "/audio/download?store=" + encodeURIComponent(d.store_id) + "&start_time=" + encodeURIComponent(startTimeISO) + "&end_time=" + encodeURIComponent(endTimeISO);
+       if (isManual) {
         var sellerName = d.seller_id ? escapeHtml(d.seller_id.replace(/_/g, ' ')) : '—';
         html += '<table style="margin:0;border:2px solid #3b82f6;border-radius:8px;overflow:hidden;"><thead style="background:#dbeafe;"><tr>' +
           '<th>Магазин</th>' +
@@ -1107,7 +1145,7 @@ AUDIO_PAGE_HTML = """<!doctype html>
             '<td style="width: 300px;">' +
               '<input type="text" class="comment-input" placeholder="Добавить комментарий..." value="' + existingCommentEscaped + '" data-comment-key="' + commentKey + '" />' +
             '</td>' +
-            '<td><a href="' + downloadUrl + '" class="btn">▶ Play</a></td>' +
+             '<td><div class="audio-controls" data-dialog-id="' + escapeHtml(dateStr + '-' + d.store_id + '-' + d.start_time + '-' + d.end_time) + '" data-date="' + escapeHtml(dateStr) + '" data-store="' + escapeHtml(d.store_id) + '" data-start="' + escapeHtml(d.start_time) + '" data-end="' + escapeHtml(d.end_time) + '"><button class="btn btn-playpause">▶ Play</button><div class="audio-progress"><span class="progress-time">00:00</span><input type="range" class="progress-slider" min="0" max="100" value="0"><span class="progress-duration">00:00</span></div></div></td>' +
             '<td><div class="action-buttons">' +
               '<button class="edit-btn" data-manual-id="' + d.manual_id + '" onclick="editManualDialog(this.dataset.manualId || this.getAttribute(&quot;data-manual-id&quot;))" title="Изменить">✏️</button>' +
               '<button class="delete-btn" data-manual-id="' + d.manual_id + '" onclick="deleteManualDialog(this.dataset.manualId || this.getAttribute(&quot;data-manual-id&quot;))" title="Удалить">❌</button>' +
@@ -1140,7 +1178,7 @@ AUDIO_PAGE_HTML = """<!doctype html>
               '<td style="width: 300px;">' +
                 '<input type="text" class="comment-input" placeholder="Добавить комментарий..." value="' + existingCommentEscaped + '" data-comment-key="' + commentKey + '" />' +
               '</td>' +
-              '<td><button class="btn download-dialog-btn" data-date="' + escapeHtml(dateStr) + '" data-session-ids="' + escapeHtml(d.session_ids.join(",")) + '">Скачать</button></td>' +
+               '<td><div class="audio-controls" data-dialog-id="' + escapeHtml(dateStr + '-' + d.store_id + '-' + d.start_time + '-' + d.end_time) + '" data-date="' + escapeHtml(dateStr) + '" data-session-ids="' + escapeHtml(d.session_ids.join(",")) + '" data-store="' + escapeHtml(d.store_id) + '" data-start="' + escapeHtml(d.start_time) + '" data-end="' + escapeHtml(d.end_time) + '"><button class="btn btn-playpause">▶ Play</button><div class="audio-progress"><span class="progress-time">00:00</span><input type="range" class="progress-slider" min="0" max="100" value="0"><span class="progress-duration">00:00</span></div></div></td>' +
             '</tr>' +
            '</tbody></table>';
        }
@@ -1177,38 +1215,331 @@ AUDIO_PAGE_HTML = """<!doctype html>
       })(addButtons[k]);
     }
     
-    var downloadButtons = tableContainer.querySelectorAll('.download-dialog-btn');
-    for (var m = 0; m < downloadButtons.length; m++) {
-      downloadButtons[m].addEventListener('click', function(e) {
-        e.preventDefault();
-        var date = this.dataset.date;
-        var sessionIds = this.dataset.sessionIds;
-        var formData = new FormData();
-        formData.append('date_str', date);
-        formData.append('session_ids', sessionIds);
-        fetch('/api/audio/download-by-dialog', {
-          method: 'POST',
-          body: formData
-        })
-        .then(function(r) {
-          if (r.ok) {
-            return r.blob();
+    // Global AudioController - single audio element with cache for the entire page
+    var AudioController = (function() {
+      var audio = null;
+      var currentState = 'idle';
+      var currentRequestId = null;
+      var currentDialogId = null;
+      var isLoading = false;
+      var audioCache = {};  // dialogId -> { audio, url, duration }
+      
+      function getState() {
+        return currentState;
+      }
+      
+      function isPlaying() {
+        return currentState === 'playing';
+      }
+      
+      function isLoadingState() {
+        return isLoading;
+      }
+      
+      function getDuration() {
+        return audio ? audio.duration : 0;
+      }
+      
+      function getCurrentTime() {
+        return audio ? audio.currentTime : 0;
+      }
+      
+      function setCurrentTime(time) {
+        if (audio) {
+          audio.currentTime = time;
+        }
+      }
+      
+      function play(dialogId, url) {
+        // If already loading this dialog, do nothing
+        if (isLoading && currentDialogId === dialogId) {
+          return;
+        }
+        
+        // If already playing or paused this dialog, just resume/toggle
+        if ((currentState === 'playing' || currentState === 'paused') && currentDialogId === dialogId) {
+          if (currentState === 'playing') {
+            pause();
+          } else {
+            resume();
           }
-          throw new Error('Download failed: ' + r.status);
-        })
-        .then(function(blob) {
-          var url = window.URL.createObjectURL(blob);
-          var a = document.createElement('a');
-          a.href = url;
-          a.download = 'audio_' + date + '_dialog.wav';
-          a.click();
-          window.URL.revokeObjectURL(url);
-        })
-        .catch(function(err) {
-          alert('Ошибка скачивания: ' + err.message);
-        });
-      });
+          return;
+        }
+        
+        // Check cache first
+        if (audioCache[dialogId] && audioCache[dialogId].audio) {
+          // Use cached audio
+          if (audio) {
+            audio.pause();
+          }
+          audio = audioCache[dialogId].audio;
+          currentDialogId = dialogId;
+          currentState = 'ready';
+          isLoading = false;
+          audio.play().catch(function(err) {
+            currentState = 'error';
+            alert('Ошибка воспроизведения: ' + err.message);
+          });
+          return;
+        }
+        
+        // Stop current audio if playing something else
+        if (audio) {
+          audio.pause();
+        }
+        
+        // Generate unique request ID for race condition protection
+        currentRequestId = Date.now() + '-' + Math.random();
+        currentDialogId = dialogId;
+        isLoading = true;
+        currentState = 'loading';
+        
+        // Create new audio element
+        audio = new Audio(url);
+        
+        audio.onloadstart = function() {
+          isLoading = true;
+          currentState = 'loading';
+        };
+        
+        audio.oncanplay = function() {
+          isLoading = false;
+          currentState = 'ready';
+          // Cache the audio
+          audioCache[dialogId] = {
+            audio: audio,
+            url: url,
+            duration: audio.duration
+          };
+          // Check if this is still the current request (race condition protection)
+          if (currentDialogId === dialogId) {
+            audio.play().catch(function(err) {
+              if (currentDialogId === dialogId) {
+                currentState = 'error';
+                alert('Ошибка воспроизведения: ' + err.message);
+              }
+            });
+          }
+        };
+        
+        audio.onplaying = function() {
+          currentState = 'playing';
+        };
+        
+        audio.onpause = function() {
+          currentState = 'paused';
+        };
+        
+        audio.onended = function() {
+          audio.currentTime = 0;
+          currentState = 'idle';
+          // Keep audio in cache, don't nullify
+        };
+        
+        audio.onerror = function() {
+          isLoading = false;
+          currentState = 'error';
+          if (currentDialogId === dialogId) {
+            alert('Ошибка: аудио не найдено или недоступно');
+          }
+          // Remove from cache on error
+          if (audioCache[dialogId]) {
+            delete audioCache[dialogId];
+          }
+        };
+      }
+      
+      function pause() {
+        if (audio && currentState === 'playing') {
+          audio.pause();
+          currentState = 'paused';
+        }
+      }
+      
+      function resume() {
+        if (audio && currentState === 'paused') {
+          audio.play().catch(function(err) {
+            currentState = 'error';
+            alert('Ошибка воспроизведения: ' + err.message);
+          });
+        }
+      }
+      
+      function isCurrentDialog(dialogId) {
+        return currentDialogId === dialogId;
+      }
+      
+      function getCurrentDialogId() {
+        return currentDialogId;
+      }
+      
+      return {
+        getState: getState,
+        isPlaying: isPlaying,
+        isLoading: isLoadingState,
+        play: play,
+        pause: pause,
+        resume: resume,
+        isCurrentDialog: isCurrentDialog,
+        getCurrentDialogId: getCurrentDialogId,
+        getDuration: getDuration,
+        getCurrentTime: getCurrentTime,
+        setCurrentTime: setCurrentTime
+      };
+     })();
+    
+    // Add event listeners for play/pause buttons and progress sliders
+    function setupAudioControls() {
+      var controls = tableContainer.querySelectorAll('.audio-controls');
+      for (var c = 0; c < controls.length; c++) {
+        (function(control) {
+          var playPauseBtn = control.querySelector('.btn-playpause');
+          var progressSlider = control.querySelector('.progress-slider');
+          var progressTime = control.querySelector('.progress-time');
+          var progressDuration = control.querySelector('.progress-duration');
+          var dialogId = control.dataset.dialogId;
+          var date = control.dataset.date;
+          var store = control.dataset.store;
+          var start = control.dataset.start;
+          var end = control.dataset.end;
+          var sessionIds = control.dataset.sessionIds || '';
+          
+          // Play/Pause button
+          if (playPauseBtn) {
+            playPauseBtn.addEventListener('click', function(e) {
+              e.preventDefault();
+              
+              // If already loading this dialog, do nothing
+              if (AudioController.isLoading() && AudioController.isCurrentDialog(dialogId)) {
+                return;
+              }
+              
+              var startTimeISO = date + 'T' + start.replace(/:/g, ':');
+              var endTimeISO = date + 'T' + end.replace(/:/g, ':');
+              
+              var url = '/audio/download?store=' + encodeURIComponent(store) + 
+                        '&start_time=' + encodeURIComponent(startTimeISO) + 
+                        '&end_time=' + encodeURIComponent(endTimeISO);
+              
+              if (sessionIds) {
+                url += '&session_ids=' + encodeURIComponent(sessionIds);
+              }
+              
+              AudioController.play(dialogId, url);
+            });
+          }
+          
+          // Progress slider
+          if (progressSlider) {
+            progressSlider.addEventListener('input', function(e) {
+              var duration = AudioController.getDuration();
+              if (duration > 0) {
+                var newTime = (progressSlider.value / 100) * duration;
+                AudioController.setCurrentTime(newTime);
+              }
+            });
+          }
+        })(controls[c]);
+      }
     }
+    
+    // Format seconds to MM:SS or HH:MM:SS
+    function formatTime(seconds) {
+      if (isNaN(seconds) || isNaN(parseFloat(seconds))) {
+        return '00:00';
+      }
+      var hrs = Math.floor(seconds / 3600);
+      var mins = Math.floor((seconds % 3600) / 60);
+      var secs = Math.floor(seconds % 60);
+      
+      if (hrs > 0) {
+        return hrs + ':' + (mins < 10 ? '0' + mins : mins) + ':' + (secs < 10 ? '0' + secs : secs);
+      }
+      return mins + ':' + (secs < 10 ? '0' + secs : secs);
+    }
+    
+    // Update button states and progress bars based on AudioController state
+    function updateAudioControls() {
+      var controls = tableContainer.querySelectorAll('.audio-controls');
+      var currentState = AudioController.getState();
+      var activeDialogId = AudioController.getCurrentDialogId();
+      var currentTime = AudioController.getCurrentTime();
+      var duration = AudioController.getDuration();
+      
+      for (var c = 0; c < controls.length; c++) {
+        var control = controls[c];
+        var dialogId = control.dataset.dialogId;
+        var playPauseBtn = control.querySelector('.btn-playpause');
+        var progressSlider = control.querySelector('.progress-slider');
+        var progressTime = control.querySelector('.progress-time');
+        var progressDuration = control.querySelector('.progress-duration');
+        
+        if (dialogId === activeDialogId) {
+          // This is the active dialog
+          if (currentState === 'loading') {
+            playPauseBtn.textContent = '⏳ Loading...';
+            playPauseBtn.disabled = true;
+            if (progressSlider) progressSlider.disabled = true;
+          } else if (currentState === 'playing' || currentState === 'paused' || currentState === 'ready') {
+            if (currentState === 'playing') {
+              playPauseBtn.textContent = '⏸ Pause';
+            } else {
+              playPauseBtn.textContent = '▶ Play';
+            }
+            playPauseBtn.disabled = false;
+            if (progressSlider) progressSlider.disabled = false;
+            
+            // Update progress bar
+            if (progressSlider && duration > 0) {
+              var progress = (currentTime / duration) * 100;
+              progressSlider.value = progress;
+            }
+            
+            // Update time display
+            if (progressTime) {
+              progressTime.textContent = formatTime(currentTime);
+            }
+            if (progressDuration) {
+              progressDuration.textContent = formatTime(duration);
+            }
+          } else if (currentState === 'error') {
+            playPauseBtn.textContent = '▶ Play';
+            playPauseBtn.disabled = false;
+            if (progressSlider) progressSlider.disabled = false;
+            if (progressTime) progressTime.textContent = '00:00';
+            if (progressDuration) progressDuration.textContent = '00:00';
+            if (progressSlider) progressSlider.value = 0;
+          } else {
+            // idle
+            playPauseBtn.textContent = '▶ Play';
+            playPauseBtn.disabled = false;
+            if (progressSlider) progressSlider.disabled = false;
+            if (progressTime) progressTime.textContent = '00:00';
+            if (progressDuration) progressDuration.textContent = '00:00';
+            if (progressSlider) progressSlider.value = 0;
+          }
+        } else {
+          // Not the active dialog - reset to default
+          playPauseBtn.textContent = '▶ Play';
+          playPauseBtn.disabled = false;
+          if (progressSlider) {
+            progressSlider.disabled = false;
+            progressSlider.value = 0;
+          }
+          if (progressTime) progressTime.textContent = '00:00';
+          if (progressDuration) progressDuration.textContent = '00:00';
+        }
+      }
+    }
+    
+    // Setup controls and start updating states
+    setupAudioControls();
+    
+    // Poll to update button states and progress (more frequent for smoother progress bar)
+    if (window.audioControlsPoll) {
+      clearInterval(window.audioControlsPoll);
+    }
+    window.audioControlsPoll = setInterval(updateAudioControls, 200);
   }
 
   function getDialogTypeLabel(type) {
@@ -2710,7 +3041,7 @@ def download_audio(
     return Response(
         content=audio_buffer.read(),
         media_type="audio/wav",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": f'inline; filename="{filename}"'},
     )
 
 
@@ -2761,5 +3092,5 @@ def download_audio_by_dialog(
     return Response(
         content=audio_buffer.read(),
         media_type="audio/wav",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": f'inline; filename="{filename}"'},
     )
