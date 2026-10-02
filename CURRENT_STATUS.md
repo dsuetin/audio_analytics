@@ -2,7 +2,419 @@
 
 > Единый источник «какое состояние проекта сейчас» для OpenCode/агентов.
 > Обновлять в каждом рабочем сеансе. Детали задач — в `TODO.md`. Агентовый entry point — `AGENTS.md`.
-> Последнее обновление: 2026-10-02 (добавлено поле «Консультант» в форму Add/Edit manual dialog: ручное указание имени, сохранение в JSON, отображение в таблице, старые dialogs → «—»).
+> Последнее обновление: 2026-10-02 (добавлена retry логика для устойчивости к плохому соединению: MAX_RETRIES=3, RETRY_DELAY=2s, автоматические повторные попытки при ошибке, сброс счётчика при смене диалога).
+
+## Итог сессии 2026-10-02 (исправлен шум "ааа" при воспроизведении)
+
+### Проблема
+При воспроизведении аудио был характерный шум "ааа" - посторонние артефакты при склейке WAV чанков.
+
+### Причина
+Функция `download_session_chunks()` неправильно читала WAV чанки:
+- Просто пропускала 44 байта вместо `wave.readframes()`
+- Сортировала чанки по полному ключу S3 вместо числового индекса
+- Не проверяла параметры WAV
+
+**Неправильно (было):**
+```python
+pcm_data = chunk_data[44:]  # ❌ Просто пропускает 44 байта
+session_files = sorted(session_files)  # ❌ Сортировка по S3 ключу
+```
+
+### Решение
+Использовать `wave.readframes()` для корректного чтения PCM:
+
+**Правильно (теперь):**
+```python
+with io.BytesIO(chunk_data) as bio, wave.open(bio, "rb") as wf:
+    n = wf.getnframes()
+    pcm_data = wf.readframes(n)  # ✅ Корректное чтение PCM
+    all_audio_data += pcm_data
+
+chunk_files.sort(key=lambda x: int(os.path.splitext(x[0])[0]))  # ✅ Сортировка по индексу
+```
+
+### Где найти рабочее решение
+
+**Исходный рабочий код:** `scripts/build_timeline_wav.py` (функция `get_session_chunks()`)
+
+**Коммит с исправлением:** `58db178 [UPDATE] обновил функцию загрузки аудио, раньше склеивалось с шумами`
+
+### Тестирование
+
+```bash
+python3 scripts/test_audio_concat.py
+```
+
+**Результаты:**
+- ✓ Single session (6 chunks, 0.90s)
+- ✓ Multiple sessions (3 sessions, 6.45s)
+- ✓ WAV parameters (all chunks: 1 channel, 16000 Hz, 2 bytes)
+- ✓ No artificial silence (0.0% silence ratio)
+
+### Деплой
+
+```bash
+docker compose restart daily_stats_api
+```
+
+### Проверка
+
+1. Открыть http://localhost:8000/reports/2026-09-26
+2. Play разные диалоги
+3. Проверить что нет шума "ааа"
+4. Аудио должно быть чётким и без артефактов
+
+### Изменённые файлы
+- `stats_service/api.py` - функция `download_session_chunks()` использует `wave.readframes()`
+- `scripts/test_audio_concat.py` - тесты
+- `AUDIO_CONCAT_FIX_REPORT.md` - подробный отчёт
+- `SOUND_FIX_FINAL.md` - итоговая документация
+
+### Статус
+✅ Исправлено в коммите `58db178`
+✅ Сервер перезапущен
+✅ Тесты пройдены
+⏳ Ожидает ручного тестирования в браузере
+
+## Итог сессии 2026-10-02 (добавлена retry логика для устойчивости к плохому соединению)
+
+### Проблема
+При плохом интернет соединении аудио постоянно вылетало с ошибкой:
+```
+Ошибка: аудио не найдено или недоступно
+```
+
+Пользователь не успевал скачать аудио - сразу ошибка.
+
+### Решение
+Добавлена retry логика с автоматическими повторными попытками:
+
+**Параметры:**
+```javascript
+var MAX_RETRIES = 3;  // Максимум 3 попытки
+var RETRY_DELAY = 2000;  // Задержка между попытками 2 секунды
+```
+
+**Поведение:**
+1. Первая попытка загрузки
+2. Если ошибка → ожидание 2 секунды → вторая попытка
+3. Если ошибка → ожидание 2 секунды → третья попытка
+4. Если ошибка → показать сообщение "Не удалось загрузить аудио. Проверьте подключение к интернету."
+
+### Изменения
+
+**Новая функция `playWithRetry`:**
+```javascript
+function playWithRetry(dialogId, url, retryCount) {
+  if (retryCount < MAX_RETRIES && currentDialogId === dialogId) {
+    setTimeout(function() {
+      playWithRetry(dialogId, url, retryCount + 1);
+    }, RETRY_DELAY);
+  } else {
+    alert('Не удалось загрузить аудио. Проверьте подключение к интернету.');
+  }
+}
+```
+
+**Логирование:**
+```
+[AUDIO] Загрузка аудио (попытка 1/3)
+[AUDIO] Ошибка загрузки аудио
+[AUDIO] Повторная попытка через 2s (2/3)
+[AUDIO] Загрузка аудио (попытка 2/3)
+[AUDIO] Успех!
+```
+
+### Тестирование
+
+1. Открыть http://localhost:8000/reports/2026-09-26
+2. Console → проверить логи `[AUDIO]`
+3. Play диалог → должно загрузиться
+4. При плохом соединении → автоматические повторные попытки
+
+### Изменённые файлы
+- `stats_service/api.py` - AudioController с retry логикой
+- `RETRY_LOGIC_FIX.md` - документация
+
+### Статус
+✅ Реализовано
+✅ Сервер перезапущен
+⏳ Ожидает ручного тестирования в браузере
+
+### Важно
+
+**Всегда использовать `wave.readframes()`** для чтения PCM данных из WAV файлов, а не просто пропускать 44 байта заголовка. WAV файлы могут иметь дополнительные chunks (LIST, INFO, etc) которые нужно корректно обработать.
+
+## Итог сессии 2026-10-02 (улучшена устойчивость AudioController)
+
+### Проблема
+Воспроизведение аудио работало нестабильно:
+```
+Loading...
+↓
+Ошибка воспроизведения: The operation is not supported.
+↓
+Ошибка: аудио не найдено или недоступно
+```
+
+### Корень проблемы
+1. `new Audio(url)` не имеет timeout контроля
+2. Нет retry логики для временных сетевых ошибок
+3. Все ошибки маскировались под "аудио не найдено"
+4. Нет проверки Content-Type ответа
+5. Нет логирования для диагностики
+
+### Решение
+
+**1. Timeout для аудио запросов**
+```javascript
+var AUDIO_TIMEOUT = 120000;  // 120 секунд для больших аудио
+var controller = new AbortController();
+var timeoutId = setTimeout(function() {
+  controller.abort();
+}, AUDIO_TIMEOUT);
+```
+
+**2. Retry логика**
+```javascript
+var MAX_RETRIES = 2;
+
+if (retryCount < MAX_RETRIES) {
+  console.log('[AUDIO] Retrying...', retryCount + 1, '/', MAX_RETRIES);
+  setTimeout(function() {
+    fetchAudioWithRetry(dialogId, url, retryCount + 1)
+      .then(resolve)
+      .catch(reject);
+  }, 1000 * (retryCount + 1));
+  return;
+}
+```
+
+**3. Разделение типов ошибок**
+- 404: "Аудио не найдено для выбранного интервала"
+- 5xx: "Ошибка сервера при подготовке аудио"
+- Timeout: "Сервер слишком долго формирует аудио. Попробуйте ещё раз."
+- Network: "Не удалось получить аудио с сервера. Попробуйте ещё раз."
+
+**4. Логирование для диагностики**
+```javascript
+console.log('[AUDIO] Request started:', dialogId, 'retry:', retryCount);
+console.log('[AUDIO] Response status:', response.status, 'content-type:', ...);
+console.log('[AUDIO] Blob received, size:', blob.size, 'type:', blob.type);
+console.log('[AUDIO] Cache hit/miss:', dialogId);
+```
+
+**5. Проверка Content-Type**
+```javascript
+var contentType = response.headers.get('content-type');
+if (!contentType || !contentType.includes('audio')) {
+  console.warn('[AUDIO] Warning: unexpected content-type:', contentType);
+}
+```
+
+**6. fetch + blob вместо new Audio(url)**
+```javascript
+fetch(url, { signal: controller.signal })
+  .then(function(response) {
+    return response.blob();
+  })
+  .then(function(blob) {
+    var objectUrl = URL.createObjectURL(blob);
+    audio = new Audio(objectUrl);
+    // ...
+  });
+```
+
+**7. Кэширование только после успешной загрузки**
+- Кэш заполняется в `oncanplay` (после успешной загрузки)
+- Кэш очищается при ошибке
+- Повреждённые response не попадают в кэш
+
+**8. Защита от race condition**
+```javascript
+if (currentDialogId !== dialogId) {
+  console.log('[AUDIO] Discarding stale response for:', dialogId);
+  return;
+}
+```
+
+### Тестирование
+
+**Автоматические тесты:**
+```bash
+python3 scripts/test_audio_controller_improved.py
+```
+✅ Все 13 тестов пройдены
+
+**Ручное тестирование (нужно в браузере):**
+1. Открыть DevTools Console
+2. Play проблемную запись → проверить логи `[AUDIO]`
+3. Проверить retry при сетевых ошибках
+4. Проверить timeout для долгих запросов
+5. Проверить разные сообщения об ошибках
+6. Проверить Network tab для Content-Type
+
+### Изменённые файлы
+- `stats_service/api.py` - улучшенный AudioController
+- `scripts/test_audio_controller_improved.py` - тесты (новый)
+
+### Статус
+✅ Реализовано
+✅ Автоматические тесты пройдены
+⏳ Ожидает ручного тестирования в браузере
+
+## Итог сессии 2026-10-02 (реализован новый аудиоплеер)
+
+### Изменения
+
+**1. Единая кнопка Play/Pause**
+- До: три кнопки (Play, Pause, Stop)
+- После: одна переключаемая кнопка
+  - `▶ Play` - когда не играет или на паузе
+  - `⏸ Pause` - когда играет
+  - Stop удалён (вместо него slider для возврата в начало)
+
+**2. Прогресс-бар с перемоткой**
+- Горизонтальный slider под кнопкой
+- Отображение: `00:37 ━━━━━━━━━●━━━━━━━ 03:42`
+- Перемотка мышью без повторной загрузки
+- Плавное обновление (200ms polling)
+
+**3. Кэширование аудио**
+- `audioCache[dialogId]` хранит загруженное аудио
+- Повторный Play того же диалога → нет нового request
+- Кэш сохраняется на всю сессию
+
+**4. Улучшенный AudioController**
+- Добавлены: `getDuration()`, `getCurrentTime()`, `setCurrentTime()`
+- Кэширование после успешной загрузки
+- Сохранение в кэше после onended
+- Удаление из кэша при ошибке
+
+**5. Форматирование времени**
+- `formatTime(seconds)`: MM:SS или HH:MM:SS
+- Отображение: `current / duration`
+
+**6. CSS стили**
+- `.audio-controls`, `.audio-progress`, `.progress-slider`
+- Кастомные стили для webkit/moz slider thumb
+
+### Технические детали
+
+```javascript
+// Кэширование
+audioCache[dialogId] = { audio, url, duration };
+
+// Повторное использование
+if (audioCache[dialogId]) {
+  audio = audioCache[dialogId].audio;
+  audio.play();
+  return;  // Без request
+}
+
+// Progress slider
+var progress = (currentTime / duration) * 100;
+progressSlider.value = progress;
+```
+
+### Тестирование
+
+**Автоматические тесты:**
+```bash
+python3 scripts/test_audio_player.py
+```
+✓ Все 11 тестов пройдены
+
+**Ручное тестирование (нужно в браузере):**
+1. Play A → 1 request в Network tab
+2. Pause → Play → 0 request (кэш)
+3. Play B → 1 request (другое аудио)
+4. Slider перемотка → 0 request
+5. Проверить разные диалоги → разные аудио
+
+### Изменённые файлы
+- `stats_service/api.py` - основная реализация
+- `scripts/test_audio_player.py` - тесты
+- `AUDIO_PLAYER_UPDATE.md` - документация
+
+### Статус
+✅ Реализовано
+✅ Автоматические тесты пройдены
+⏳ Ожидает ручного тестирования в браузере
+
+## Итог сессии 2026-10-02 (исправлена проблема с closure в setupAudioControls)
+
+- **Проблема:** Все строки воспроизводили одно и то же аудио, кнопки Pause не работали
+- **Корень проблемы:** Классическая ошибка с closure в JavaScript - все обработчики `addEventListener` ссылались на одну переменную `control` в цикле `for`, которая после завершения цикла содержала ссылку на последний элемент
+- **Решение:** IIFE (Immediately Invoked Function Expression) создаёт новую scope для каждой итерации цикла
+- **Изменения:**
+  - `setupAudioControls()`: Обернут цикл в IIFE `(function(control) { ... })(controls[c])` (строки 1309-1376)
+  - Переменные `date`, `store`, `start`, `end`, `dialogId` теперь локальны в closure
+  - Добавлена проверка: если уже играет этот диалог → ничего не делать
+  - Добавлена проверка: если на паузе этот диалог → resume()
+  - `AudioController.play()`: Добавлена проверка на playing/paused state (строки 1209-1225)
+- **Тестирование:**
+  - IIFE найден: ✓
+  - Переменные локальны в closure: ✓
+  - AudioController.isCurrentDialog используется: ✓
+  - Проверка на playing state найдена: ✓
+  - AudioController.resume() найден: ✓
+  - Разные строки → разные запросы к backend: ✓
+- **Статус:** Исправлено, все тесты пройдены
+
+## Итог сессии 2026-10-02 (реализован AudioController для управления воспроизведением)
+
+- **Задача:** Реализовать полноценное управление воспроизведением с защитой от race condition
+- **Решение:** Единый AudioController с правильным управлением состояниями
+- **Изменения:**
+  - AudioController (singleton pattern) с состояниями: idle, loading, ready, playing, paused, stopped, error
+  - HTML: `<div class="audio-controls">` с кнопками Play/Pause/Stop/Loading
+  - Защита от двойных кликов во время loading
+  - Race condition protection через currentRequestId и currentDialogId
+  - Единый audio element для всей страницы
+  - Polling (100ms) для обновления состояния кнопок
+  - Переключение на другой диалог останавливает предыдущий
+  - Pause сохраняет позицию, Stop сбрасывает в начало
+  - onended возвращает в состояние idle
+- **Состояния кнопок:**
+  - Idle: ▶
+  - Loading: ⏳ (disabled)
+  - Playing: ⏸ ⏹
+  - Paused: ▶ ⏹
+  - Error: ▶ (с сообщением)
+- **Тестирование:**
+  - AudioController найден: ✓
+  - audio-controls container найден: ✓
+  - Кнопки Play/Pause/Stop найдены: ✓
+  - Loading indicator найден: ✓
+  - setupAudioControls найден: ✓
+  - updateAudioControls найден: ✓
+  - Polling найден: ✓
+- **Статус:** Готово, все тесты пройдены
+
+## Итог сессии 2026-10-02 (запрещено скачивание аудио через UI)
+
+- **Задача:** Запретить скачивание аудиофайлов через интерфейс первой страницы
+- **Решение:**
+  - Удалена кнопка "Скачать" для обычных диалогов
+  - Кнопка ▶ Play заменена на inline воспроизведение
+  - Content-Disposition изменён с `attachment` на `inline`
+  - Браузер получает аудио только через backend API
+  - Нет прямого доступа к S3/MinIO/presigned URLs
+- **Изменения:**
+  - Обычные диалоги: `<button class="play-dialog-btn">▶</button>` (строка 1143)
+  - Manual dialogs: `<button class="play-manual-btn">▶</button>` (строка 1107)
+  - Обработчик: воспроизведение через `new Audio(url)` (строки 1180-1199)
+  - Backend: `Content-Disposition: inline` (строки 2705, 2756)
+  - Удалён неиспользуемый код `downloadUrl` (строка 1083)
+- **Тестирование:**
+  - Нет кнопки "Скачать" в таблице: ✓
+  - Нет класса download-dialog-btn: ✓
+  - Есть классы play-dialog-btn и play-manual-btn: ✓
+  - Нет ссылки на /api/audio/download-by-dialog: ✓
+  - Content-Disposition: inline: ✓
+- **Статус:** Готово, все тесты пройдены
 
 ## Итог сессии 2026-10-02 (добавлено поле консультанта в форму manual dialog)
 

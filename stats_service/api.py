@@ -1223,6 +1223,9 @@ AUDIO_PAGE_HTML = """<!doctype html>
       var currentDialogId = null;
       var isLoading = false;
       var audioCache = {};  // dialogId -> { audio, url, duration }
+      var retryCount = 0;  // Счётчик попыток перезагрузки
+      var MAX_RETRIES = 3;  // Максимум 3 попытки
+      var RETRY_DELAY = 2000;  // Задержка между попытками 2 секунды
       
       function getState() {
         return currentState;
@@ -1250,7 +1253,12 @@ AUDIO_PAGE_HTML = """<!doctype html>
         }
       }
       
-      function play(dialogId, url) {
+       function play(dialogId, url) {
+        // Сброс счётчика при смене диалога
+        if (currentDialogId !== dialogId) {
+          retryCount = 0;
+        }
+        
         // If already loading this dialog, do nothing
         if (isLoading && currentDialogId === dialogId) {
           return;
@@ -1276,6 +1284,7 @@ AUDIO_PAGE_HTML = """<!doctype html>
           currentDialogId = dialogId;
           currentState = 'ready';
           isLoading = false;
+          retryCount = 0;  // Сброс счётчика при использовании кэша
           audio.play().catch(function(err) {
             currentState = 'error';
             alert('Ошибка воспроизведения: ' + err.message);
@@ -1293,6 +1302,8 @@ AUDIO_PAGE_HTML = """<!doctype html>
         currentDialogId = dialogId;
         isLoading = true;
         currentState = 'loading';
+        retryCount = 0;  // Сброс счётчика перед новой загрузкой
+        console.log('[AUDIO] Начинаю загрузку аудио');
         
         // Create new audio element
         audio = new Audio(url);
@@ -1305,12 +1316,16 @@ AUDIO_PAGE_HTML = """<!doctype html>
         audio.oncanplay = function() {
           isLoading = false;
           currentState = 'ready';
+          retryCount = 0;  // Сброс счётчика при успешной загрузке
+          console.log('[AUDIO] Аудио успешно загружено');
+          
           // Cache the audio
           audioCache[dialogId] = {
             audio: audio,
             url: url,
             duration: audio.duration
           };
+          
           // Check if this is still the current request (race condition protection)
           if (currentDialogId === dialogId) {
             audio.play().catch(function(err) {
@@ -1337,14 +1352,37 @@ AUDIO_PAGE_HTML = """<!doctype html>
         };
         
         audio.onerror = function() {
-          isLoading = false;
-          currentState = 'error';
-          if (currentDialogId === dialogId) {
-            alert('Ошибка: аудио не найдено или недоступно');
-          }
-          // Remove from cache on error
-          if (audioCache[dialogId]) {
-            delete audioCache[dialogId];
+          console.error('[AUDIO] Ошибка загрузки аудио');
+          
+          // Если есть ещё попытки - пробуем снова
+          if (retryCount < MAX_RETRIES && currentDialogId === dialogId) {
+            retryCount++;
+            console.log('[AUDIO] Повторная попытка через ' + (RETRY_DELAY / 1000) + 's (' + retryCount + '/' + MAX_RETRIES + ')');
+            
+            // Показать что идёт повторная попытка
+            isLoading = true;
+            currentState = 'loading';
+            
+            setTimeout(function() {
+              // Перезагрузить аудио
+              audio = null;
+              play(dialogId, url);
+            }, RETRY_DELAY);
+          } else {
+            // Больше нет попыток
+            isLoading = false;
+            currentState = 'error';
+            retryCount = 0;  // Сброс счётчика
+            
+            // Remove from cache on error
+            if (audioCache[dialogId]) {
+              delete audioCache[dialogId];
+            }
+            
+            if (currentDialogId === dialogId) {
+              console.error('[AUDIO] Не удалось загрузить аудио после ' + MAX_RETRIES + ' попыток');
+              alert('Не удалось загрузить аудио. Проверьте подключение к интернету.');
+            }
           }
         };
       }
