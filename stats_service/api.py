@@ -772,6 +772,16 @@ AUDIO_PAGE_HTML = """<!doctype html>
   .error-message.active {
     display: block;
   }
+  .error-message.info-message {
+    background: #eff6ff;
+    border-color: #bfdbfe;
+    color: #1e40af;
+  }
+  .error-message.warning-message {
+    background: #fef3c7;
+    border-color: #fde68a;
+    color: #92400e;
+  }
   .manual-badge {
     display: inline-block;
     background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
@@ -814,6 +824,89 @@ AUDIO_PAGE_HTML = """<!doctype html>
     gap: 2px;
     align-items: center;
   }
+  .time-slider-container {
+    margin: 16px 0;
+  }
+  .time-slider-wrapper {
+    position: relative;
+    padding: 12px 0;
+  }
+  .time-slider-labels {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    color: var(--muted);
+    margin-bottom: 4px;
+  }
+  .time-slider-track {
+    position: relative;
+    height: 4px;
+    background: #e5e7eb;
+    border-radius: 2px;
+  }
+  .time-slider-range {
+    position: absolute;
+    height: 100%;
+    background: linear-gradient(90deg, #3b82f6 0%, #2563eb 100%);
+    border-radius: 2px;
+    pointer-events: none;
+  }
+  .time-slider-handle {
+    position: absolute;
+    width: 16px;
+    height: 16px;
+    background: #fff;
+    border: 2px solid #2563eb;
+    border-radius: 50%;
+    cursor: grab;
+    top: 50%;
+    transform: translateY(-50%);
+    transition: transform 0.1s ease, box-shadow 0.1s ease;
+  }
+  .time-slider-handle:hover {
+    transform: translateY(-50%) scale(1.1);
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.2);
+  }
+  .time-slider-handle:active {
+    cursor: grabbing;
+    transform: translateY(-50%) scale(1.15);
+  }
+  .time-slider-handle.time-slider-start {
+    border-color: #10b981;
+  }
+  .time-slider-handle.time-slider-end {
+    border-color: #f59e0b;
+  }
+  .btn-preview {
+    background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+    color: #fff;
+    border: none;
+    padding: 8px 16px;
+    border-radius: 6px;
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    width: 100%;
+  }
+  .btn-preview:hover {
+    background: linear-gradient(135deg, #059669 0%, #047857 100%);
+    transform: translateY(-1px);
+  }
+  .btn-preview:disabled {
+    background: #d1d5db;
+    cursor: not-allowed;
+    transform: none;
+  }
+  #audio-preview-container {
+    display: none;
+  }
+  #audio-preview-container.active {
+    display: block;
+  }
+  #audio-preview {
+    width: 100%;
+    height: 40px;
+  }
 </style>
 </head>
 <body>
@@ -844,11 +937,27 @@ AUDIO_PAGE_HTML = """<!doctype html>
 
        <div class="alert" id="alert" role="alert"></div>
 
-        <div class="modal-overlay" id="modal-overlay">
+         <div class="modal-overlay" id="modal-overlay">
           <div class="modal">
             <h2>Добавить пропущенный диалог</h2>
             <div class="error-message" id="modal-error"></div>
             <form id="manual-dialog-form">
+              <div class="form-group">
+                <label>Временной интервал</label>
+                <div class="time-slider-container">
+                  <div class="time-slider-wrapper">
+                    <div class="time-slider-labels">
+                      <span id="slider-min-label">--:--:--</span>
+                      <span id="slider-max-label">--:--:--</span>
+                    </div>
+                    <div class="time-slider-track" id="time-slider-track">
+                      <div class="time-slider-range" id="time-slider-range"></div>
+                      <div class="time-slider-handle time-slider-start" id="time-slider-start"></div>
+                      <div class="time-slider-handle time-slider-end" id="time-slider-end"></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
               <div class="form-group">
                 <label for="manual-start-time">Начало сессии</label>
                 <input type="time" id="manual-start-time" step="1" required />
@@ -857,10 +966,20 @@ AUDIO_PAGE_HTML = """<!doctype html>
                 <label for="manual-end-time">Конец сессии</label>
                 <input type="time" id="manual-end-time" step="1" required />
               </div>
-              <div class="form-group">
-                <label for="manual-dialog-type">Цель миссии</label>
-                <textarea id="manual-dialog-type" placeholder="Например: Покупка товара" required></textarea>
-              </div>
+               <div class="form-group">
+                 <button type="button" class="btn-preview" id="modal-preview">▶ Прослушать</button>
+                 <div id="audio-preview-container" style="display:none;margin-top:8px;">
+                   <audio id="audio-preview" controls></audio>
+                 </div>
+               </div>
+               <div class="form-group">
+                 <label for="manual-seller">Консультант</label>
+                 <input type="text" id="manual-seller" placeholder="Например: Иван Петров" />
+               </div>
+               <div class="form-group">
+                 <label for="manual-dialog-type">Цель миссии</label>
+                 <textarea id="manual-dialog-type" placeholder="Например: Покупка товара" required></textarea>
+               </div>
               <div class="form-group">
                 <label for="manual-result">Итог</label>
                 <textarea id="manual-result" placeholder="Например: Клиент совершил покупку" required></textarea>
@@ -887,6 +1006,10 @@ AUDIO_PAGE_HTML = """<!doctype html>
   var tableContainer = document.getElementById("table-container");
   var alertBox = document.getElementById("alert");
   var currentData = null;
+  var sliderMinSeconds = 0;
+  var sliderMaxSeconds = 86400;
+  var isDragging = null;
+  var audioPreview = null;
 
   function showError(message) {
     alertBox.textContent = message;
@@ -904,28 +1027,45 @@ AUDIO_PAGE_HTML = """<!doctype html>
   }
 
   function renderTable(dialogs) {
+    var dateStr = dateSelect.value;
+    var storeId = storeSelect.value === "all" ? null : storeSelect.value;
+    
     if (!dialogs || dialogs.length === 0) {
-      tableContainer.innerHTML = '<div class="no-data">Нет данных для отображения</div>';
+      if (storeId) {
+        tableContainer.innerHTML = '<div style="display:flex;flex-direction:column;gap:4px;"><button class="add-dialog-btn" data-prev-end="08:00:00" data-next-start="20:00:00">+ Добавить диалог</button></div>';
+        var addButtons = tableContainer.querySelectorAll('.add-dialog-btn');
+        for (var k = 0; k < addButtons.length; k++) {
+          (function(btn) {
+            btn.addEventListener('click', function() {
+              openAddDialogModal(btn.dataset.prevEnd, btn.dataset.nextStart);
+            });
+          })(addButtons[k]);
+        }
+      } else {
+        tableContainer.innerHTML = '<div class="no-data">Нет данных для отображения</div>';
+      }
       return;
     }
 
-    var dateStr = dateSelect.value;
-    var storeId = storeSelect.value === "all" ? null : storeSelect.value;
     var html = '<div style="display:flex;flex-direction:column;gap:4px;">';
 
-    for (var i = 0; i < dialogs.length; i++) {
-      var d = dialogs[i];
-      var isManual = d.is_manual === true;
-      
-      if (storeId) {
-        if (i === 0) {
-          // Add button before first dialog
-          html += '<button class="add-dialog-btn">+ Добавить диалог</button>';
-        } else {
-          // Add button between dialogs
-          html += '<button class="add-dialog-btn">+ Добавить диалог</button>';
-        }
-      }
+     for (var i = 0; i < dialogs.length; i++) {
+       var d = dialogs[i];
+       var isManual = d.is_manual === true;
+       
+       if (storeId) {
+         if (i === 0) {
+           // Add button before first dialog
+           var nextStart = d.start_time;
+           html += '<button class="add-dialog-btn" data-prev-end="08:00:00" data-next-start="' + nextStart + '">+ Добавить диалог</button>';
+         } else {
+           // Add button between dialogs
+           var prevDialog = dialogs[i - 1];
+           var prevEnd = prevDialog.end_time;
+           var nextStart = d.start_time;
+           html += '<button class="add-dialog-btn" data-prev-end="' + prevEnd + '" data-next-start="' + nextStart + '">+ Добавить диалог</button>';
+         }
+       }
       
       var dialogType = isManual ? d.dialog_type : getDialogTypeLabel(d.dialog_type);
       var saleResult = isManual ? d.result : (d.is_sale ? "Покупка" : "Нет покупки");
@@ -941,8 +1081,10 @@ AUDIO_PAGE_HTML = """<!doctype html>
         var startTimeISO = dateStr + 'T' + d.start_time.replace(/:/g, ':');
         var endTimeISO = dateStr + 'T' + d.end_time.replace(/:/g, ':');
         var downloadUrl = "/audio/download?store=" + encodeURIComponent(d.store_id) + "&start_time=" + encodeURIComponent(startTimeISO) + "&end_time=" + encodeURIComponent(endTimeISO);
+        var sellerName = d.seller_id ? escapeHtml(d.seller_id.replace(/_/g, ' ')) : '—';
         html += '<table style="margin:0;border:2px solid #3b82f6;border-radius:8px;overflow:hidden;"><thead style="background:#dbeafe;"><tr>' +
           '<th>Магазин</th>' +
+          '<th>Консультант</th>' +
           '<th>Клиент</th>' +
           '<th>Начало</th>' +
           '<th>Конец</th>' +
@@ -955,6 +1097,7 @@ AUDIO_PAGE_HTML = """<!doctype html>
           '</tr></thead><tbody>' +
           '<tr data-comment-key="' + commentKey + '">' +
             '<td>' + escapeHtml(d.store_id) + '</td>' +
+            '<td>' + sellerName + '</td>' +
             '<td>Manual <span class="manual-badge">Ручной</span></td>' +
             '<td>' + d.start_time + '</td>' +
             '<td>' + d.end_time + '</td>' +
@@ -972,36 +1115,41 @@ AUDIO_PAGE_HTML = """<!doctype html>
           '</tr>' +
           '</tbody></table>';
        } else {
-         html += '<table style="margin:0;"><thead><tr>' +
-           '<th>Магазин</th>' +
-           '<th>Клиент</th>' +
-           '<th>Начало</th>' +
-           '<th>Конец</th>' +
-           '<th>Длительность</th>' +
-           '<th>Цель визита</th>' +
-           '<th>Результат</th>' +
-           '<th>Комментарий</th>' +
-           '<th>Аудио</th>' +
-           '</tr></thead><tbody>' +
-           '<tr data-comment-key="' + commentKey + '">' +
-             '<td>' + escapeHtml(d.store_id) + '</td>' +
-             '<td>' + escapeHtml(d.client_id) + '</td>' +
-             '<td>' + d.start_time + '</td>' +
-             '<td>' + d.end_time + '</td>' +
-             '<td class="tooltip-cell" data-tooltip="' + recognitionTextEscaped + '">' + formatDuration(d.duration_sec) + '</td>' +
-             '<td class="tooltip-cell" data-tooltip="' + reasoningEscaped + '">' + dialogType + '</td>' +
-             '<td>' + saleResult + '</td>' +
-             '<td style="width: 300px;">' +
-               '<input type="text" class="comment-input" placeholder="Добавить комментарий..." value="' + existingCommentEscaped + '" data-comment-key="' + commentKey + '" />' +
-             '</td>' +
-             '<td><button class="btn download-dialog-btn" data-date="' + escapeHtml(dateStr) + '" data-session-ids="' + escapeHtml(d.session_ids.join(",")) + '">Скачать</button></td>' +
-           '</tr>' +
+          var sellerName = d.seller_id ? escapeHtml(d.seller_id.replace(/_/g, ' ')) : '—';
+          html += '<table style="margin:0;"><thead><tr>' +
+            '<th>Магазин</th>' +
+            '<th>Консультант</th>' +
+            '<th>Клиент</th>' +
+            '<th>Начало</th>' +
+            '<th>Конец</th>' +
+            '<th>Длительность</th>' +
+            '<th>Цель визита</th>' +
+            '<th>Результат</th>' +
+            '<th>Комментарий</th>' +
+            '<th>Аудио</th>' +
+            '</tr></thead><tbody>' +
+            '<tr data-comment-key="' + commentKey + '">' +
+              '<td>' + escapeHtml(d.store_id) + '</td>' +
+              '<td>' + sellerName + '</td>' +
+              '<td>' + escapeHtml(d.client_id) + '</td>' +
+              '<td>' + d.start_time + '</td>' +
+              '<td>' + d.end_time + '</td>' +
+              '<td class="tooltip-cell" data-tooltip="' + recognitionTextEscaped + '">' + formatDuration(d.duration_sec) + '</td>' +
+              '<td class="tooltip-cell" data-tooltip="' + reasoningEscaped + '">' + dialogType + '</td>' +
+              '<td>' + saleResult + '</td>' +
+              '<td style="width: 300px;">' +
+                '<input type="text" class="comment-input" placeholder="Добавить комментарий..." value="' + existingCommentEscaped + '" data-comment-key="' + commentKey + '" />' +
+              '</td>' +
+              '<td><button class="btn download-dialog-btn" data-date="' + escapeHtml(dateStr) + '" data-session-ids="' + escapeHtml(d.session_ids.join(",")) + '">Скачать</button></td>' +
+            '</tr>' +
            '</tbody></table>';
        }
     }
     
     if (storeId) {
-      html += '<button class="add-dialog-btn">+ Добавить диалог</button>';
+      var lastDialog = dialogs[dialogs.length - 1];
+      var lastEnd = lastDialog ? lastDialog.end_time : '08:00:00';
+      html += '<button class="add-dialog-btn" data-prev-end="' + lastEnd + '" data-next-start="20:00:00">+ Добавить диалог</button>';
     }
     
     html += '</div>';
@@ -1022,7 +1170,11 @@ AUDIO_PAGE_HTML = """<!doctype html>
     
     var addButtons = tableContainer.querySelectorAll('.add-dialog-btn');
     for (var k = 0; k < addButtons.length; k++) {
-      addButtons[k].addEventListener('click', openAddDialogModal);
+      (function(btn) {
+        btn.addEventListener('click', function() {
+          openAddDialogModal(btn.dataset.prevEnd, btn.dataset.nextStart);
+        });
+      })(addButtons[k]);
     }
     
     var downloadButtons = tableContainer.querySelectorAll('.download-dialog-btn');
@@ -1129,7 +1281,43 @@ AUDIO_PAGE_HTML = """<!doctype html>
 
   var editingDialogId = null;
 
-  function openAddDialogModal() {
+  function prepareModalForTimeSelection(dateStr, storeId, prevEnd, nextStart, startTime, endTime, isEdit) {
+    // Calculate slider boundaries based on neighbors
+    var defaultMin = timeToSeconds('08:00:00');
+    var defaultMax = timeToSeconds('20:00:00');
+    
+    if (prevEnd && nextStart) {
+      sliderMinSeconds = timeToSeconds(prevEnd);
+      sliderMaxSeconds = timeToSeconds(nextStart);
+    } else {
+      sliderMinSeconds = defaultMin;
+      sliderMaxSeconds = defaultMax;
+    }
+    
+    // Set initial values
+    if (startTime && endTime) {
+      // Edit mode: use existing values
+      document.getElementById('manual-start-time').value = startTime;
+      document.getElementById('manual-end-time').value = endTime;
+    } else {
+      // Add mode: use full available range
+      document.getElementById('manual-start-time').value = secondsToTime(sliderMinSeconds);
+      document.getElementById('manual-end-time').value = secondsToTime(sliderMaxSeconds);
+    }
+    
+    initSlider();
+    
+    var previewBtn = document.getElementById('modal-preview');
+    previewBtn.onclick = function() {
+      var startVal = document.getElementById('manual-start-time').value;
+      var endVal = document.getElementById('manual-end-time').value;
+      if (startVal && endVal) {
+        playAudioPreview(dateStr, storeId, startVal, endVal);
+      }
+    };
+  }
+
+  function openAddDialogModal(prevEnd, nextStart) {
     if (!modalOverlay) {
       initModal();
     }
@@ -1139,6 +1327,13 @@ AUDIO_PAGE_HTML = """<!doctype html>
     editingDialogId = null;
     document.querySelector('.modal h2').textContent = 'Добавить пропущенный диалог';
     modalOverlay.classList.add('active');
+    
+    var dateStr = dateSelect.value;
+    var storeId = storeSelect.value;
+    
+    if (dateStr && storeId && storeId !== 'all') {
+      prepareModalForTimeSelection(dateStr, storeId, prevEnd, nextStart, null, null, false);
+    }
   }
 
   function editManualDialog(dialogId) {
@@ -1146,12 +1341,14 @@ AUDIO_PAGE_HTML = """<!doctype html>
       initModal();
     }
     
-    // Find the dialog to edit
+    // Find the dialog to edit and its neighbors
     var dialogs = currentData ? currentData.dialogs : [];
     var dialogToEdit = null;
+    var editIndex = -1;
     for (var i = 0; i < dialogs.length; i++) {
       if (dialogs[i].manual_id === dialogId) {
         dialogToEdit = dialogs[i];
+        editIndex = i;
         break;
       }
     }
@@ -1161,13 +1358,32 @@ AUDIO_PAGE_HTML = """<!doctype html>
       return;
     }
     
+    // Calculate boundaries based on neighbors (excluding the dialog being edited)
+    var defaultMin = '08:00:00';
+    var defaultMax = '20:00:00';
+    
+    var prevEnd = defaultMin;
+    var nextStart = defaultMax;
+    
+    if (editIndex > 0) {
+      prevEnd = dialogs[editIndex - 1].end_time;
+    }
+    
+    if (editIndex < dialogs.length - 1) {
+      nextStart = dialogs[editIndex + 1].start_time;
+    }
+    
     // Fill the form with existing values
     modalError.classList.remove('active');
     modalError.textContent = '';
     
-    // Set time values (format: HH:MM:SS)
-    document.getElementById('manual-start-time').value = dialogToEdit.start_time;
-    document.getElementById('manual-end-time').value = dialogToEdit.end_time;
+    var sellerName = dialogToEdit.seller_id;
+    if (sellerName === '—' || !sellerName) {
+      sellerName = '';
+    } else if (sellerName.includes('_')) {
+      sellerName = sellerName.replace(/_/g, ' ');
+    }
+    document.getElementById('manual-seller').value = sellerName;
     document.getElementById('manual-dialog-type').value = dialogToEdit.dialog_type;
     document.getElementById('manual-result').value = dialogToEdit.result;
     
@@ -1176,13 +1392,238 @@ AUDIO_PAGE_HTML = """<!doctype html>
     document.querySelector('.modal h2').textContent = 'Редактировать диалог';
     
     modalOverlay.classList.add('active');
+    
+    var dateStr = dialogToEdit.date || dateSelect.value;
+    var storeId = dialogToEdit.store_id || storeSelect.value;
+    
+    if (dateStr && storeId) {
+      prepareModalForTimeSelection(dateStr, storeId, prevEnd, nextStart, dialogToEdit.start_time, dialogToEdit.end_time, true);
+    }
   }
 
   function closeModal() {
     if (modalOverlay) {
       modalOverlay.classList.remove('active');
       editingDialogId = null;
+      if (audioPreview) {
+        audioPreview.pause();
+        audioPreview.src = '';
+        document.getElementById('audio-preview-container').classList.remove('active');
+      }
     }
+  }
+
+  function timeToSeconds(timeStr) {
+    var parts = timeStr.split(':');
+    if (parts.length < 2) return null;
+    var hours = parseInt(parts[0]) || 0;
+    var minutes = parseInt(parts[1]) || 0;
+    var seconds = parseInt(parts[2]) || 0;
+    return hours * 3600 + minutes * 60 + seconds;
+  }
+
+  function secondsToTime(secs) {
+    var hours = Math.floor(secs / 3600);
+    var minutes = Math.floor((secs % 3600) / 60);
+    var seconds = secs % 60;
+    return hours.toString().padStart(2, '0') + ':' + 
+           minutes.toString().padStart(2, '0') + ':' + 
+           seconds.toString().padStart(2, '0');
+  }
+
+  function initSlider() {
+    var track = document.getElementById('time-slider-track');
+    var range = document.getElementById('time-slider-range');
+    var startHandle = document.getElementById('time-slider-start');
+    var endHandle = document.getElementById('time-slider-end');
+    var minLabel = document.getElementById('slider-min-label');
+    var maxLabel = document.getElementById('slider-max-label');
+    
+    if (!track || !range || !startHandle || !endHandle) return;
+    
+    var startTimeInput = document.getElementById('manual-start-time');
+    var endTimeInput = document.getElementById('manual-end-time');
+    
+    function updateSliderFromInputs() {
+      var startSeconds = timeToSeconds(startTimeInput.value) || 0;
+      var endSeconds = timeToSeconds(endTimeInput.value) || sliderMaxSeconds;
+      
+      startSeconds = Math.max(sliderMinSeconds, Math.min(startSeconds, sliderMaxSeconds - 1));
+      endSeconds = Math.max(startSeconds + 1, Math.min(endSeconds, sliderMaxSeconds));
+      
+      var startPercent = ((startSeconds - sliderMinSeconds) / (sliderMaxSeconds - sliderMinSeconds)) * 100;
+      var endPercent = ((endSeconds - sliderMinSeconds) / (sliderMaxSeconds - sliderMinSeconds)) * 100;
+      
+      startHandle.style.left = (startPercent - 0.5) + '%';
+      endHandle.style.left = (endPercent - 0.5) + '%';
+      range.style.left = startPercent + '%';
+      range.style.width = (endPercent - startPercent) + '%';
+      
+      minLabel.textContent = secondsToTime(sliderMinSeconds);
+      maxLabel.textContent = secondsToTime(sliderMaxSeconds);
+    }
+    
+    function updateInputsFromSlider(startSeconds, endSeconds) {
+      startSeconds = Math.round(startSeconds);
+      endSeconds = Math.round(endSeconds);
+      
+      startTimeInput.value = secondsToTime(startSeconds);
+      endTimeInput.value = secondsToTime(endSeconds);
+      updateSliderFromInputs();
+    }
+    
+    function getSecondsFromX(e) {
+      var rect = track.getBoundingClientRect();
+      var x = e.clientX - rect.left;
+      var percent = Math.max(0, Math.min(100, (x / rect.width) * 100));
+      var seconds = sliderMinSeconds + (percent / 100) * (sliderMaxSeconds - sliderMinSeconds);
+      return Math.round(seconds);
+    }
+    
+    function handleMouseMove(e) {
+      if (!isDragging) return;
+      e.preventDefault();
+      
+      var seconds = getSecondsFromX(e);
+      var startTime = timeToSeconds(startTimeInput.value) || sliderMinSeconds;
+      var endTime = timeToSeconds(endTimeInput.value) || sliderMaxSeconds;
+      
+      if (isDragging === 'start') {
+        seconds = Math.max(sliderMinSeconds, Math.min(seconds, endTime - 1));
+        updateInputsFromSlider(seconds, endTime);
+      } else if (isDragging === 'end') {
+        seconds = Math.max(startTime + 1, Math.min(seconds, sliderMaxSeconds));
+        updateInputsFromSlider(startTime, seconds);
+      }
+    }
+    
+    function handleMouseUp() {
+      isDragging = null;
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    }
+    
+    startHandle.addEventListener('mousedown', function(e) {
+      isDragging = 'start';
+      document.addEventListener('mousemove', handleMouseMove);
+      document.addEventListener('mouseup', handleMouseUp);
+      e.preventDefault();
+    });
+    
+    endHandle.addEventListener('mousedown', function(e) {
+      isDragging = 'end';
+      document.addEventListener('mousemove', handleMouseMove);
+      document.addEventListener('mouseup', handleMouseUp);
+      e.preventDefault();
+    });
+    
+    startTimeInput.addEventListener('input', function() {
+      updateSliderFromInputs();
+    });
+    
+    endTimeInput.addEventListener('input', function() {
+      updateSliderFromInputs();
+    });
+    
+    updateSliderFromInputs();
+  }
+
+  function loadAudioBoundaries(dateStr, storeId, callback) {
+    fetch('/api/audio/boundaries?date=' + encodeURIComponent(dateStr) + '&store=' + encodeURIComponent(storeId))
+      .then(function(response) {
+        return response.json();
+      })
+      .then(function(data) {
+        callback(data);
+      })
+      .catch(function(err) {
+        console.error('Failed to load audio boundaries:', err);
+        callback(null);
+      });
+  }
+
+  function playAudioPreview(dateStr, storeId, startTime, endTime) {
+    var previewBtn = document.getElementById('modal-preview');
+    var previewContainer = document.getElementById('audio-preview-container');
+    var modalError = document.getElementById('modal-error');
+    
+    if (previewBtn.disabled) return;
+    
+    // Clear any previous error
+    modalError.classList.remove('active');
+    modalError.textContent = '';
+    
+    // Clear previous preview
+    if (audioPreview) {
+      audioPreview.pause();
+      audioPreview.src = '';
+    }
+    previewContainer.classList.remove('active');
+    
+    previewBtn.disabled = true;
+    previewBtn.textContent = '⏳ Загружается...';
+    
+    // Parse time (HH:MM:SS) and build ISO format
+    var startParts = startTime.split(':');
+    var endParts = endTime.split(':');
+    
+    var startSeconds = startParts.length > 2 ? parseInt(startParts[2]) : 0;
+    var endSeconds = endParts.length > 2 ? parseInt(endParts[2]) : 0;
+    
+    // Build ISO format: YYYY-MM-DDTHH:MM:SS
+    var startISO = dateStr + 'T' + startTime + (startParts.length === 2 ? ':00' : '');
+    var endISO = dateStr + 'T' + endTime + (endParts.length === 2 ? ':00' : '');
+    
+    var url = '/audio/download?store=' + encodeURIComponent(storeId) + 
+              '&start_time=' + encodeURIComponent(startISO) + 
+              '&end_time=' + encodeURIComponent(endISO);
+    
+    fetch(url)
+      .then(function(response) {
+        if (response.status === 404) {
+          throw { status: 404, message: 'В выбранном интервале нет аудио для прослушивания' };
+        }
+        if (response.status === 422) {
+          throw { status: 422, message: 'Некорректный формат времени. Проверьте значения Start и End' };
+        }
+        if (!response.ok) {
+          throw { status: response.status, message: 'Не удалось загрузить аудио' };
+        }
+        return response.blob();
+      })
+      .then(function(blob) {
+        var audioUrl = URL.createObjectURL(blob);
+        audioPreview = document.getElementById('audio-preview');
+        audioPreview.src = audioUrl;
+        audioPreview.load();
+        audioPreview.play().catch(function(err) {
+          console.error('Playback error:', err);
+        });
+        previewContainer.classList.add('active');
+        previewBtn.disabled = false;
+        previewBtn.textContent = '▶ Прослушать';
+      })
+      .catch(function(err) {
+        console.error('Preview error:', err);
+        previewBtn.disabled = false;
+        previewBtn.textContent = '▶ Прослушать';
+        
+        // Show appropriate error message
+        var errorMessage = err.message || 'Не удалось загрузить аудио';
+        
+        if (err.status === 404) {
+          // No audio available - show info message, not error
+          modalError.textContent = 'ℹ️ ' + errorMessage;
+          modalError.classList.add('active', 'info-message');
+        } else if (err.status === 422) {
+          // Validation error
+          modalError.textContent = '⚠️ ' + errorMessage;
+          modalError.classList.add('active', 'warning-message');
+        } else {
+          // Other errors
+          showModalError(errorMessage);
+        }
+      });
   }
 
   function saveManualDialog() {
@@ -1196,6 +1637,7 @@ AUDIO_PAGE_HTML = """<!doctype html>
     
     var startTimeInput = document.getElementById('manual-start-time').value;
     var endTimeInput = document.getElementById('manual-end-time').value;
+    var sellerId = document.getElementById('manual-seller').value.trim();
     var dialogType = document.getElementById('manual-dialog-type').value.trim();
     var result = document.getElementById('manual-result').value.trim();
     
@@ -1230,6 +1672,7 @@ AUDIO_PAGE_HTML = """<!doctype html>
           store_id: storeId,
           start_time: startTime,
           end_time: endTime,
+          seller_id: sellerId,
           dialog_type: dialogType,
           result: result
         })
@@ -1257,6 +1700,7 @@ AUDIO_PAGE_HTML = """<!doctype html>
           store_id: storeId,
           start_time: startTime,
           end_time: endTime,
+          seller_id: sellerId,
           dialog_type: dialogType,
           result: result
         })
@@ -1956,6 +2400,7 @@ def create_manual_dialog(dialog_data: dict):
             raise HTTPException(status_code=400, detail=error_msg)
         
         import uuid
+        seller_id = dialog_data.get("seller_id", "").strip() or "—"
         new_dialog = {
             "id": str(uuid.uuid4()),
             "date": date_str,
@@ -1964,6 +2409,7 @@ def create_manual_dialog(dialog_data: dict):
             "end_time": end_time,
             "dialog_type": dialog_data["dialog_type"],
             "result": dialog_data["result"],
+            "seller_id": seller_id,
             "is_manual": True,
             "created_at": datetime.now().isoformat(),
         }
@@ -2025,6 +2471,8 @@ def update_manual_dialog(dialog_id: str, dialog_data: dict):
         dialog_to_update["end_time"] = end_time
         dialog_to_update["dialog_type"] = dialog_data["dialog_type"]
         dialog_to_update["result"] = dialog_data["result"]
+        seller_id = dialog_data.get("seller_id", "").strip() or "—"
+        dialog_to_update["seller_id"] = seller_id
         
         save_manual_dialogs(dialogs)
         
@@ -2122,7 +2570,7 @@ def get_report_data(
                 dialogs.append({
                     "client_id": "Manual",
                     "store_id": md.get("store_id"),
-                    "seller_id": "",
+                    "seller_id": md.get("seller_id", "—"),
                     "start_time": md.get("start_time"),
                     "end_time": md.get("end_time"),
                     "duration_sec": 0,
@@ -2145,6 +2593,62 @@ def get_report_data(
         "stores": sorted(stores),
         "clients": sorted(clients),
     }
+
+
+@app.get("/api/audio/boundaries")
+def get_audio_boundaries(
+    date: str = Query(..., description="Date (YYYY-MM-DD)"),
+    store: str = Query(..., description="Store name"),
+):
+    """Get audio session boundaries for a store on a given date"""
+    try:
+        date_str = date.replace("-", "")
+        s3_client = get_s3_client()
+        all_sessions = list_sessions_for_store(s3_client, date_str, store)
+        
+        if not all_sessions:
+            return {
+                "has_audio": False,
+                "min_seconds": None,
+                "max_seconds": None,
+                "sessions": []
+            }
+        
+        # Get time boundaries
+        times = []
+        for session in all_sessions:
+            seconds = get_session_time_seconds(session)
+            if seconds is not None:
+                times.append(seconds)
+        
+        if not times:
+            return {
+                "has_audio": False,
+                "min_seconds": None,
+                "max_seconds": None,
+                "sessions": []
+            }
+        
+        min_seconds = min(times)
+        max_seconds = max(times)
+        
+        # Convert to HH:MM:SS format
+        def seconds_to_time(secs):
+            hours = secs // 3600
+            minutes = (secs % 3600) // 60
+            seconds = secs % 60
+            return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        
+        return {
+            "has_audio": True,
+            "min_seconds": min_seconds,
+            "max_seconds": max_seconds,
+            "min_time": seconds_to_time(min_seconds),
+            "max_time": seconds_to_time(max_seconds),
+            "sessions": all_sessions
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get audio boundaries: {str(e)}")
 
 
 @app.get("/audio/download")
