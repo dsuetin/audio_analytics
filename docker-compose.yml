@@ -95,7 +95,7 @@ services:
       - "9001:9001"
 
     volumes:
-      - minio_data:/data
+      - /mnt/data/minio:/data
     restart: unless-stopped
 
   worker:
@@ -395,5 +395,4 @@ services:
     restart: unless-stopped
 
 volumes:
-  minio_data:
   postgres_data:
