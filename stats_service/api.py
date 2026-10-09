@@ -12,7 +12,7 @@ import pandas as pd
 
 from fastapi import FastAPI, HTTPException, Query, Form
 from fastapi.responses import FileResponse, HTMLResponse, Response
-from stats_service.stores import get_all_stores
+from stats_service.stores import get_all_stores, match_store_id
 
 app = FastAPI(title="Stats Service")
 
@@ -3134,7 +3134,8 @@ def get_reports_dates():
 @app.get("/api/reports/{date_str}/data")
 def get_report_data(
     date_str: str,
-    store_filter: Optional[str] = Query(None, description="Filter by store (optional)"),
+    store: Optional[str] = Query(None, description="Filter by store (optional)"),
+    store_filter: Optional[str] = Query(None, description="Filter by store (optional, deprecated)"),
     client_filter: Optional[str] = Query(None, description="Filter by client (optional)"),
 ):
     """Get report data for a given date with optional filters"""
@@ -3148,9 +3149,12 @@ def get_report_data(
     if df is None:
         raise HTTPException(status_code=404, detail=f"No report found for date {date_str}")
 
+    # Use store_filter if provided, otherwise use store
+    filter_store = store_filter or store
+    
     # Apply filters
-    if store_filter and store_filter != "all":
-        df = df[df["store_id"] == store_filter]
+    if filter_store and filter_store != "all":
+        df = df[df["store_id"].apply(lambda x: match_store_id(x, filter_store))]
     if client_filter and client_filter != "all":
         df = df[df["client_id"] == client_filter]
 
@@ -3192,7 +3196,8 @@ def get_report_data(
     manual_dialogs = load_manual_dialogs()
     for md in manual_dialogs:
         if md.get("date") == date_str:
-            if not store_filter or md.get("store_id") == store_filter:
+            md_store_id = md.get("store_id")
+            if not filter_store or match_store_id(md_store_id, filter_store):
                 dialogs.append({
                     "client_id": "Manual",
                     "store_id": md.get("store_id"),
@@ -3239,7 +3244,7 @@ async def get_monitoring_status():
         )
         
         try:
-            records = await conn.fetch(
+            active_records = await conn.fetch(
                 """
                 SELECT
                     store_id,
@@ -3250,10 +3255,21 @@ async def get_monitoring_status():
                 """,
                 ten_minutes_ago,
             )
+            
+            all_last_audio_records = await conn.fetch(
+                """
+                SELECT
+                    store_id,
+                    MAX(created_at) AS last_audio_at
+                FROM transcripts
+                GROUP BY store_id
+                """
+            )
         finally:
             await conn.close()
         
-        active_stores = {record["store_id"]: record["last_audio_at"] for record in records}
+        active_stores = {record["store_id"]: record["last_audio_at"] for record in active_records}
+        all_last_audio = {record["store_id"]: record["last_audio_at"] for record in all_last_audio_records}
         
         result = []
         for store in all_stores:
@@ -3266,11 +3282,12 @@ async def get_monitoring_status():
                     "last_audio_at": last_audio_at.isoformat() if last_audio_at else None,
                 })
             else:
+                last_known_audio_at = all_last_audio.get(store)
                 result.append({
                     "store_id": store,
                     "store_name": store,
                     "active": False,
-                    "last_audio_at": None,
+                    "last_audio_at": last_known_audio_at.isoformat() if last_known_audio_at else None,
                 })
         
         return result
