@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 import os
 import io
@@ -334,6 +334,7 @@ INDEX_HTML = """<!doctype html>
     <div class="nav-links">
       <a href="/audio" class="nav-link">Скачать аудио по отчётам</a>
       <a href="/audio/time-range" class="nav-link">Скачать аудио по времени</a>
+      <a href="/mic-monitoring" class="nav-link">Мониторинг микрофонов</a>
     </div>
   </main>
 
@@ -944,10 +945,10 @@ AUDIO_PAGE_HTML = """<!doctype html>
   #audio-preview-container.active {
     display: block;
   }
-  #audio-preview {
-    width: 100%;
-    height: 40px;
-  }
+   #audio-preview {
+     width: 100%;
+     height: 40px;
+   }
 </style>
 </head>
 <body>
@@ -1034,6 +1035,7 @@ AUDIO_PAGE_HTML = """<!doctype html>
         </div>
 
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">
+        <a href="/mic-monitoring" class="nav-link">Мониторинг микрофонов</a>
         <a href="/audio/time-range" class="nav-link">Скачать аудио по времени</a>
         <a href="/" class="nav-link">← Вернуться к отчётам</a>
       </div>
@@ -2121,7 +2123,7 @@ AUDIO_PAGE_HTML = """<!doctype html>
     return div.innerHTML;
   }
 
-  function loadStores() {
+   function loadStores() {
     return fetch("/api/stores")
       .then(function(response) {
         if (!response.ok) {
@@ -2551,6 +2553,261 @@ def audio_time_range_page():
     return AUDIO_TIME_RANGE_HTML
 
 
+MIC_MONITORING_HTML = """<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Мониторинг микрофонов — Audio Analytics</title>
+  <style>
+    :root {
+      --bg: #f3f5f9;
+      --card: #ffffff;
+      --text: #1f2937;
+      --muted: #6b7280;
+      --border: #e5e7eb;
+      --accent: #2563eb;
+      --accent-hover: #1d4ed8;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      margin: 0;
+      padding: 24px;
+    }
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 24px;
+    }
+    .header h1 {
+      font-size: 24px;
+      font-weight: 600;
+      margin: 0;
+    }
+    .header a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+    .header a:hover {
+      text-decoration: underline;
+    }
+    .monitoring-section {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      box-shadow: 0 1px 3px rgba(16, 24, 40, 0.06), 0 8px 24px rgba(16, 24, 40, 0.06);
+      padding: 24px;
+    }
+    .monitoring-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 16px;
+    }
+    .monitoring-title {
+      font-size: 18px;
+      font-weight: 600;
+      color: var(--text);
+      margin: 0;
+    }
+    .monitoring-updated {
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .monitoring-list {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 12px;
+    }
+    .monitoring-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 12px;
+      background: #f9fafb;
+      border-radius: 8px;
+      font-size: 14px;
+    }
+    .monitoring-indicator {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .monitoring-indicator.active {
+      background: #10b981;
+      box-shadow: 0 0 8px rgba(16, 185, 129, 0.5);
+    }
+    .monitoring-indicator.inactive {
+      background: #ef4444;
+    }
+    .monitoring-indicator.loading {
+      background: #f59e0b;
+      animation: pulse 1.5s ease-in-out infinite;
+    }
+    .monitoring-indicator.error {
+      background: #6b7280;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+    .monitoring-store {
+      flex: 1;
+      font-weight: 500;
+      color: var(--text);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .monitoring-time {
+      font-size: 12px;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .monitoring-error {
+      text-align: center;
+      padding: 40px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .monitoring-loading {
+      text-align: center;
+      padding: 40px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>Мониторинг микрофонов</h1>
+      <a href="/audio">← К аудио отчётам</a>
+    </div>
+    <div class="monitoring-section" id="monitoring-section">
+      <div class="monitoring-header">
+        <h2 class="monitoring-title">Статус микрофонов (активность за последние 10 минут)</h2>
+        <span class="monitoring-updated" id="monitoring-updated"></span>
+      </div>
+      <div class="monitoring-list" id="monitoring-list">
+        <div class="monitoring-loading">Загрузка...</div>
+      </div>
+    </div>
+  </div>
+
+<script>
+  function setMonitoringLoading() {
+    var list = document.getElementById("monitoring-list");
+    var updated = document.getElementById("monitoring-updated");
+    if (list) {
+      list.innerHTML = '<div class="monitoring-loading">Загрузка...</div>';
+    }
+    if (updated) {
+      updated.textContent = "";
+    }
+  }
+
+  function formatMonitoringTime(isoString) {
+    if (!isoString) return "--:--:--";
+    try {
+      var date = new Date(isoString);
+      var hours = String(date.getHours()).padStart(2, "0");
+      var minutes = String(date.getMinutes()).padStart(2, "0");
+      var seconds = String(date.getSeconds()).padStart(2, "0");
+      return hours + ":" + minutes + ":" + seconds;
+    } catch (e) {
+      return "--:--:--";
+    }
+  }
+
+  function renderMonitoringList(data) {
+    var list = document.getElementById("monitoring-list");
+    var updated = document.getElementById("monitoring-updated");
+
+    if (!data || data.length === 0) {
+      if (list) {
+        list.innerHTML = '<div class="monitoring-error">Нет данных</div>';
+      }
+      return;
+    }
+
+    var html = "";
+    for (var i = 0; i < data.length; i++) {
+      var store = data[i];
+      var statusClass = store.active ? "active" : "inactive";
+      var timeStr = formatMonitoringTime(store.last_audio_at);
+      html += '<div class="monitoring-item">';
+      html += '<div class="monitoring-indicator ' + statusClass + '"></div>';
+      html += '<div class="monitoring-store" title="' + store.store_id.replace(/"/g, "&quot;") + '">' + store.store_id.replace(/</g, "&lt;") + '</div>';
+      html += '<div class="monitoring-time">' + timeStr + '</div>';
+      html += '</div>';
+    }
+    if (list) {
+      list.innerHTML = html;
+    }
+    if (updated) {
+      var now = new Date();
+      updated.textContent = "Обновлено: " + now.toLocaleTimeString("ru-RU");
+    }
+  }
+
+  function setMonitoringError(message) {
+    var list = document.getElementById("monitoring-list");
+    var updated = document.getElementById("monitoring-updated");
+    if (list) {
+      list.innerHTML = '<div class="monitoring-error">⚠️ Нет связи с сервером</div>';
+    }
+    if (updated) {
+      updated.textContent = "";
+    }
+  }
+
+  async function loadMonitoringData() {
+    try {
+      setMonitoringLoading();
+      var response = await fetch("/api/audio/monitoring");
+      if (!response.ok) {
+        throw new Error("Failed to load monitoring data");
+      }
+      var data = await response.json();
+      renderMonitoringList(data);
+    } catch (error) {
+      console.error("Monitoring error:", error);
+      setMonitoringError(error.message);
+    }
+  }
+
+  function initMonitoring() {
+    loadMonitoringData();
+    if (window.monitoringPollInterval) {
+      clearInterval(window.monitoringPollInterval);
+    }
+    window.monitoringPollInterval = setInterval(loadMonitoringData, 60000);
+  }
+
+  document.addEventListener("DOMContentLoaded", function() {
+    initMonitoring();
+  });
+</script>
+</body>
+</html>
+"""
+
+
+@app.get("/mic-monitoring", response_class=HTMLResponse)
+def mic_monitoring_page():
+    return MIC_MONITORING_HTML
+
+
 @app.get("/reports/daily")
 def generate_report(report_date: date):
 
@@ -2962,6 +3219,63 @@ def get_report_data(
         "stores": sorted(stores),
         "clients": sorted(clients),
     }
+
+
+@app.get("/api/audio/monitoring")
+async def get_monitoring_status():
+    """Get monitoring status for all stores (active/inactive based on last 10 minutes)"""
+    try:
+        import asyncpg
+        
+        all_stores = get_all_stores()
+        ten_minutes_ago = datetime.now(timezone.utc) - timedelta(minutes=10)
+        
+        conn = await asyncpg.connect(
+            host=os.getenv("POSTGRES_HOST", "localhost"),
+            port=int(os.getenv("POSTGRES_PORT", "5432")),
+            user=os.getenv("POSTGRES_USER", "speech"),
+            password=os.getenv("POSTGRES_PASSWORD", "speech"),
+            database=os.getenv("POSTGRES_DB", "speech_db"),
+        )
+        
+        try:
+            records = await conn.fetch(
+                """
+                SELECT
+                    store_id,
+                    MAX(created_at) AS last_audio_at
+                FROM transcripts
+                WHERE created_at >= $1
+                GROUP BY store_id
+                """,
+                ten_minutes_ago,
+            )
+        finally:
+            await conn.close()
+        
+        active_stores = {record["store_id"]: record["last_audio_at"] for record in records}
+        
+        result = []
+        for store in all_stores:
+            if store in active_stores:
+                last_audio_at = active_stores[store]
+                result.append({
+                    "store_id": store,
+                    "store_name": store,
+                    "active": True,
+                    "last_audio_at": last_audio_at.isoformat() if last_audio_at else None,
+                })
+            else:
+                result.append({
+                    "store_id": store,
+                    "store_name": store,
+                    "active": False,
+                    "last_audio_at": None,
+                })
+        
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get monitoring status: {str(e)}")
 
 
 @app.get("/api/audio/boundaries")
