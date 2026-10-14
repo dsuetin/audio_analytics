@@ -64,13 +64,41 @@ def get_s3_client():
     )
 
 
+def extract_store_id_from_session(session_id: str) -> str | None:
+    """Extract store_id from session_id.
+    
+    Session ID format: YYYYMMDD-HHMMSS-store_id-seller_name-uuid
+    Example: 20261002-081807-г_Армавир_ул_Советской_Армии_378-гридин_вадим-45301bb1-cdcf-4c7c-b113-346b7ca61eee
+    
+    Returns the full store_id or None if format is invalid.
+    """
+    try:
+        parts = session_id.split("-")
+        if len(parts) >= 3:
+            # parts[0] = date (YYYYMMDD)
+            # parts[1] = time (HHMMSS)
+            # parts[2] = store_id (may contain underscores but not hyphens within the store name itself)
+            # parts[3] = seller_name
+            # parts[4+] = uuid parts
+            
+            # Store_id is the third component (index 2)
+            store_id = parts[2]
+            if store_id and len(store_id) > 0:
+                return store_id
+    except (IndexError, ValueError):
+        pass
+    return None
+
+
 def list_sessions_for_store(s3_client, date_str: str, store_name: str):
-    """List all sessions for a store on a given date"""
+    """List all sessions for a store on a given date.
+    
+    Uses exact store_id matching by extracting store_id from session_id.
+    This prevents false matches when store names share common prefixes
+    (e.g., "...37" matching both "...37" and "...378").
+    """
     date_prefix = f"audio/{date_str}"
     sessions = []
-
-    # Нормализуем название магазина (убираем пробелы и приводим к нижнему регистру)
-    store_normalized = store_name.replace(" ", "").lower()
 
     paginator = s3_client.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=S3_BUCKET, Prefix=date_prefix):
@@ -80,9 +108,9 @@ def list_sessions_for_store(s3_client, date_str: str, store_name: str):
                 parts = key.split("/")
                 if len(parts) >= 2:
                     session = parts[1]
-                    session_normalized = session.replace(" ", "").lower()
-                    # Проверяем частичное совпадение
-                    if store_normalized in session_normalized or session_normalized in store_normalized:
+                    # Extract store_id from session_id exactly
+                    session_store_id = extract_store_id_from_session(session)
+                    if session_store_id and session_store_id == store_name:
                         if session not in sessions:
                             sessions.append(session)
 
@@ -1307,29 +1335,52 @@ AUDIO_PAGE_HTML = """<!doctype html>
         retryCount = 0;  // Сброс счётчика перед новой загрузкой
         console.log('[AUDIO] Начинаю загрузку аудио');
         
+        // Timeout для защиты от бесконечной загрузки
+        var loadTimeout = setTimeout(function() {
+          if (currentDialogId === dialogId && currentState === 'loading') {
+            console.error('[AUDIO] Таймаут загрузки (>30s)');
+            isLoading = false;
+            currentState = 'error';
+            if (audio) {
+              audio.pause();
+              audio = null;
+            }
+          }
+        }, 30000);
+        
+        // Очистить timeout при успешной загрузке
+        var clearLoadTimeout = function() {
+          if (loadTimeout) {
+            clearTimeout(loadTimeout);
+            loadTimeout = null;
+          }
+        };
+        
         // Create new audio element
         audio = new Audio(url);
         
         audio.onloadstart = function() {
           isLoading = true;
           currentState = 'loading';
+          console.log('[AUDIO] Загрузка началась');
         };
         
-        audio.oncanplay = function() {
-          isLoading = false;
-          currentState = 'ready';
-          retryCount = 0;  // Сброс счётчика при успешной загрузке
-          console.log('[AUDIO] Аудио успешно загружено');
-          
-          // Cache the audio
-          audioCache[dialogId] = {
-            audio: audio,
-            url: url,
-            duration: audio.duration
-          };
-          
-          // Check if this is still the current request (race condition protection)
-          if (currentDialogId === dialogId) {
+        audio.onloadedmetadata = function() {
+          console.log('[AUDIO] Метаданные загружены, duration: ' + audio.duration);
+          clearLoadTimeout();
+          // Метаданные загружены - можно начинать воспроизведение
+          if (currentDialogId === dialogId && currentState === 'loading') {
+            isLoading = false;
+            currentState = 'ready';
+            retryCount = 0;
+            
+            // Cache the audio
+            audioCache[dialogId] = {
+              audio: audio,
+              url: url,
+              duration: audio.duration
+            };
+            
             audio.play().catch(function(err) {
               if (currentDialogId === dialogId) {
                 currentState = 'error';
@@ -1339,8 +1390,44 @@ AUDIO_PAGE_HTML = """<!doctype html>
           }
         };
         
+        audio.oncanplay = function() {
+          console.log('[AUDIO] Аудио готово к воспроизведению (oncanplay)');
+          clearLoadTimeout();
+          // Если onloadedmetadata ещё не сработал
+          if (currentState === 'loading') {
+            isLoading = false;
+            currentState = 'ready';
+            retryCount = 0;
+            
+            // Cache the audio
+            audioCache[dialogId] = {
+              audio: audio,
+              url: url,
+              duration: audio.duration
+            };
+            
+            if (currentDialogId === dialogId) {
+              audio.play().catch(function(err) {
+                if (currentDialogId === dialogId) {
+                  currentState = 'error';
+                  alert('Ошибка воспроизведения: ' + err.message);
+                }
+              });
+            }
+          }
+        };
+        
+        audio.onprogress = function() {
+          console.log('[AUDIO] Прогресс загрузки: ' + (audio.buffered.length > 0 ? audio.buffered.end(0) / audio.duration * 100 : 0) + '%');
+        };
+        
+        audio.onstalled = function() {
+          console.warn('[AUDIO] Загрузка приостановлена (стало медленно)');
+        };
+        
         audio.onplaying = function() {
           currentState = 'playing';
+          console.log('[AUDIO] Воспроизведение началось');
         };
         
         audio.onpause = function() {
@@ -1354,7 +1441,8 @@ AUDIO_PAGE_HTML = """<!doctype html>
         };
         
         audio.onerror = function() {
-          console.error('[AUDIO] Ошибка загрузки аудио');
+          console.error('[AUDIO] Ошибка загрузки аудио: ' + (audio.error ? audio.error.message : 'unknown'));
+          clearLoadTimeout();
           
           // Если есть ещё попытки - пробуем снова
           if (retryCount < MAX_RETRIES && currentDialogId === dialogId) {
@@ -3356,6 +3444,7 @@ def download_audio(
     store: str = Query(..., description="Store name"),
     start_time: datetime = Query(..., description="Start time (ISO format)"),
     end_time: datetime = Query(..., description="End time (ISO format)"),
+    session_ids: str = Query(None, description="Comma-separated session IDs (optional, takes precedence)"),
 ):
     if not store or not store.strip():
         raise HTTPException(status_code=400, detail="Store name is required")
@@ -3369,19 +3458,29 @@ def download_audio(
 
     s3_client = get_s3_client()
 
-    all_sessions = list_sessions_for_store(s3_client, date_str, store)
+    # If session_ids provided, use them directly (takes precedence)
+    if session_ids:
+        filtered_sessions = [s.strip() for s in session_ids.split(",") if s.strip()]
+        if not filtered_sessions:
+            raise HTTPException(
+                status_code=404,
+                detail="No valid session IDs provided",
+            )
+    else:
+        # Fallback to store name and time range search
+        all_sessions = list_sessions_for_store(s3_client, date_str, store)
 
-    filtered_sessions = []
-    for session in all_sessions:
-        session_seconds = get_session_time_seconds(session)
-        if session_seconds is not None and start_seconds <= session_seconds < end_seconds:
-            filtered_sessions.append(session)
+        filtered_sessions = []
+        for session in all_sessions:
+            session_seconds = get_session_time_seconds(session)
+            if session_seconds is not None and start_seconds <= session_seconds < end_seconds:
+                filtered_sessions.append(session)
 
-    if not filtered_sessions:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No audio sessions found for store '{store}' in time range {start_time.strftime('%H:%M:%S')} - {end_time.strftime('%H:%M:%S')}",
-        )
+        if not filtered_sessions:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No audio sessions found for store '{store}' in time range {start_time.strftime('%H:%M:%S')} - {end_time.strftime('%H:%M:%S')}",
+            )
 
     all_audio_data = []
     for session_id in filtered_sessions:
