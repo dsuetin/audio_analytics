@@ -345,6 +345,43 @@ services:
       POSTGRES_USER: speech
       POSTGRES_PASSWORD: speech
       POSTGRES_DB: speech_db
+      REPORT_OUTPUT_DIR: /reports
+
+    restart: unless-stopped
+
+  daily_stats_api_test:
+    <<: *daily-stats
+    image: audio_analytics-daily_stats_service:latest
+    container_name: daily-stats-api-test
+    command:
+      - uvicorn
+      - stats_service.api:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8010"
+    volumes:
+      - ./tests/reports:/tests_reports
+      - ./stats_service:/app/stats_service
+      - ./offline_analysis:/app/offline_analysis
+    ports:
+      - "8010:8010"
+    environment:
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_ACCESS_KEY_ID: minioadmin
+      S3_SECRET_ACCESS_KEY: minioadmin
+      S3_BUCKET: audio-sessions
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: speech
+      POSTGRES_PASSWORD: speech
+      POSTGRES_DB: speech_db
+      REPORT_OUTPUT_DIR: /tests_reports
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://172.18.0.1:11434}
+      OFFLINE_LLM_MODEL: ${OFFLINE_LLM_MODEL:-qwen3.8:27b}
+      OFFLINE_ANALYSIS_ENABLED: ${OFFLINE_ANALYSIS_ENABLED:-1}
+      OFFLINE_WORKERS: ${OFFLINE_WORKERS:-1}
+      OFFLINE_LLM_TIMEOUT: ${OFFLINE_LLM_TIMEOUT:-3600}
 
     restart: unless-stopped
 

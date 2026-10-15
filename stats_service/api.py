@@ -1208,7 +1208,7 @@ AUDIO_PAGE_HTML = """<!doctype html>
               '<td style="width: 300px;">' +
                 '<input type="text" class="comment-input" placeholder="Добавить комментарий..." value="' + existingCommentEscaped + '" data-comment-key="' + commentKey + '" />' +
               '</td>' +
-               '<td><div class="audio-controls" data-dialog-id="' + escapeHtml(dateStr + '-' + d.store_id + '-' + d.start_time + '-' + d.end_time) + '" data-date="' + escapeHtml(dateStr) + '" data-session-ids="' + escapeHtml(d.session_ids.join(",")) + '" data-store="' + escapeHtml(d.store_id) + '" data-start="' + escapeHtml(d.start_time) + '" data-end="' + escapeHtml(d.end_time) + '"><button class="btn btn-playpause">▶ Play</button><div class="audio-progress"><span class="progress-time">00:00</span><input type="range" class="progress-slider" min="0" max="100" value="0"><span class="progress-duration">00:00</span></div></div></td>' +
+                '<td><div class="audio-controls" data-dialog-id="' + escapeHtml(dateStr + '-' + d.store_id + '-' + d.start_time + '-' + d.end_time) + '" data-date="' + escapeHtml(dateStr) + '" data-session-ids="' + escapeHtml(d.session_ids.join(",")) + '" data-store="' + escapeHtml(d.session_ids.length > 0 ? d.session_ids[0].split('-')[2] : d.store_id) + '" data-start="' + escapeHtml(d.start_time) + '" data-end="' + escapeHtml(d.end_time) + '"><button class="btn btn-playpause">▶ Play</button><div class="audio-progress"><span class="progress-time">00:00</span><input type="range" class="progress-slider" min="0" max="100" value="0"><span class="progress-duration">00:00</span></div></div></td>' +
             '</tr>' +
            '</tbody></table>';
        }
@@ -1283,147 +1283,190 @@ AUDIO_PAGE_HTML = """<!doctype html>
         }
       }
       
-       function play(dialogId, url) {
-        // Сброс счётчика при смене диалога
-        if (currentDialogId !== dialogId) {
-          retryCount = 0;
-        }
-        
-        // If already loading this dialog, do nothing
-        if (isLoading && currentDialogId === dialogId) {
-          return;
-        }
-        
-        // If already playing or paused this dialog, just resume/toggle
-        if ((currentState === 'playing' || currentState === 'paused') && currentDialogId === dialogId) {
-          if (currentState === 'playing') {
-            pause();
-          } else {
-            resume();
-          }
-          return;
-        }
-        
-        // Check cache first
-        if (audioCache[dialogId] && audioCache[dialogId].audio) {
-          // Use cached audio
-          if (audio) {
-            audio.pause();
-          }
-          audio = audioCache[dialogId].audio;
-          currentDialogId = dialogId;
-          currentState = 'ready';
-          isLoading = false;
-          retryCount = 0;  // Сброс счётчика при использовании кэша
-          audio.play().catch(function(err) {
-            currentState = 'error';
-            alert('Ошибка воспроизведения: ' + err.message);
-          });
-          return;
-        }
-        
-        // Stop current audio if playing something else
-        if (audio) {
-          audio.pause();
-        }
-        
-        // Generate unique request ID for race condition protection
-        currentRequestId = Date.now() + '-' + Math.random();
-        currentDialogId = dialogId;
-        isLoading = true;
-        currentState = 'loading';
-        retryCount = 0;  // Сброс счётчика перед новой загрузкой
-        console.log('[AUDIO] Начинаю загрузку аудио');
-        
-        // Timeout для защиты от бесконечной загрузки
-        var loadTimeout = setTimeout(function() {
-          if (currentDialogId === dialogId && currentState === 'loading') {
-            console.error('[AUDIO] Таймаут загрузки (>30s)');
-            isLoading = false;
-            currentState = 'error';
-            if (audio) {
-              audio.pause();
-              audio = null;
-            }
-          }
-        }, 30000);
-        
-        // Очистить timeout при успешной загрузке
-        var clearLoadTimeout = function() {
-          if (loadTimeout) {
-            clearTimeout(loadTimeout);
-            loadTimeout = null;
-          }
-        };
-        
-        // Create new audio element
-        audio = new Audio(url);
-        
-        audio.onloadstart = function() {
-          isLoading = true;
-          currentState = 'loading';
-          console.log('[AUDIO] Загрузка началась');
-        };
-        
-        audio.onloadedmetadata = function() {
-          console.log('[AUDIO] Метаданные загружены, duration: ' + audio.duration);
-          clearLoadTimeout();
-          // Метаданные загружены - можно начинать воспроизведение
-          if (currentDialogId === dialogId && currentState === 'loading') {
-            isLoading = false;
-            currentState = 'ready';
-            retryCount = 0;
-            
-            // Cache the audio
-            audioCache[dialogId] = {
-              audio: audio,
-              url: url,
-              duration: audio.duration
-            };
-            
-            audio.play().catch(function(err) {
-              if (currentDialogId === dialogId) {
-                currentState = 'error';
-                alert('Ошибка воспроизведения: ' + err.message);
-              }
-            });
-          }
-        };
-        
-        audio.oncanplay = function() {
-          console.log('[AUDIO] Аудио готово к воспроизведению (oncanplay)');
-          clearLoadTimeout();
-          // Если onloadedmetadata ещё не сработал
-          if (currentState === 'loading') {
-            isLoading = false;
-            currentState = 'ready';
-            retryCount = 0;
-            
-            // Cache the audio
-            audioCache[dialogId] = {
-              audio: audio,
-              url: url,
-              duration: audio.duration
-            };
-            
-            if (currentDialogId === dialogId) {
-              audio.play().catch(function(err) {
-                if (currentDialogId === dialogId) {
-                  currentState = 'error';
-                  alert('Ошибка воспроизведения: ' + err.message);
-                }
-              });
-            }
-          }
-        };
-        
-        audio.onprogress = function() {
-          console.log('[AUDIO] Прогресс загрузки: ' + (audio.buffered.length > 0 ? audio.buffered.end(0) / audio.duration * 100 : 0) + '%');
-        };
-        
-        audio.onstalled = function() {
-          console.warn('[AUDIO] Загрузка приостановлена (стало медленно)');
-        };
+        function play(dialogId, audioData) {
+         // Сброс счётчика при смене диалога
+         if (currentDialogId !== dialogId) {
+           retryCount = 0;
+         }
+         
+         // If already loading this dialog, do nothing
+         if (isLoading && currentDialogId === dialogId) {
+           return;
+         }
+         
+         // If already playing or paused this dialog, just resume/toggle
+         if ((currentState === 'playing' || currentState === 'paused') && currentDialogId === dialogId) {
+           if (currentState === 'playing') {
+             pause();
+           } else {
+             resume();
+           }
+           return;
+         }
+         
+         // Check cache first
+         if (audioCache[dialogId] && audioCache[dialogId].audio) {
+           if (audio) {
+             audio.pause();
+           }
+           audio = audioCache[dialogId].audio;
+           currentDialogId = dialogId;
+           currentState = 'ready';
+           isLoading = false;
+           retryCount = 0;
+           audio.play().catch(function(err) {
+             currentState = 'error';
+             alert('Ошибка воспроизведения: ' + err.message);
+           });
+           return;
+         }
+         
+         // Stop current audio if playing something else
+         if (audio) {
+           audio.pause();
+         }
+         
+         currentRequestId = Date.now() + '-' + Math.random();
+         currentDialogId = dialogId;
+         isLoading = true;
+         currentState = 'loading';
+         retryCount = 0;
+         console.log('[AUDIO] Начинаю загрузку аудио (POST)');
+         
+         var loadTimeout = setTimeout(function() {
+           if (currentDialogId === dialogId && currentState === 'loading') {
+             console.error('[AUDIO] Таймаут загрузки (>30s)');
+             isLoading = false;
+             currentState = 'error';
+             if (audio) {
+               audio.pause();
+               audio = null;
+             }
+           }
+         }, 30000);
+         
+         var clearLoadTimeout = function() {
+           if (loadTimeout) {
+             clearTimeout(loadTimeout);
+             loadTimeout = null;
+           }
+         };
+         
+         // POST запрос для загрузки аудио
+         var formData = new FormData();
+         formData.append('date_str', audioData.date);
+         formData.append('session_ids', audioData.sessionIds);
+         
+         fetch('/api/audio/download-by-dialog', {
+           method: 'POST',
+           body: formData
+         })
+         .then(function(response) {
+           if (!response.ok) {
+             throw new Error('Download failed: ' + response.status);
+           }
+           return response.blob();
+         })
+          .then(function(blob) {
+            clearLoadTimeout();
+            console.log('[AUDIO] Blob size:', blob.size);
+            var audioUrl = window.URL.createObjectURL(blob);
+            console.log('[AUDIO] Creating Audio element');
+            audio = new Audio(audioUrl);
+            console.log('[AUDIO] Audio element created:', audio !== null);
+           
+           audio.onloadstart = function() {
+             isLoading = true;
+             currentState = 'loading';
+             console.log('[AUDIO] Загрузка началась');
+           };
+           
+           audio.onloadedmetadata = function() {
+             console.log('[AUDIO] Метаданные загружены, duration: ' + audio.duration);
+             if (currentDialogId === dialogId && currentState === 'loading') {
+               isLoading = false;
+               currentState = 'ready';
+               retryCount = 0;
+               audioCache[dialogId] = { audio: audio, duration: audio.duration };
+               audio.play().catch(function(err) {
+                 if (currentDialogId === dialogId) {
+                   currentState = 'error';
+                   alert('Ошибка воспроизведения: ' + err.message);
+                 }
+               });
+             }
+           };
+           
+           audio.oncanplay = function() {
+             if (currentState === 'loading') {
+               isLoading = false;
+               currentState = 'ready';
+               retryCount = 0;
+               audioCache[dialogId] = { audio: audio, duration: audio.duration };
+               if (currentDialogId === dialogId) {
+                 audio.play().catch(function(err) {
+                   if (currentDialogId === dialogId) {
+                     currentState = 'error';
+                     alert('Ошибка воспроизведения: ' + err.message);
+                   }
+                 });
+               }
+             }
+           };
+           
+           audio.onprogress = function() {
+             if (audio.buffered.length > 0 && audio.duration > 0) {
+               console.log('[AUDIO] Прогресс: ' + Math.round(audio.buffered.end(0) / audio.duration * 100) + '%');
+             }
+           };
+           
+           audio.onplaying = function() {
+             currentState = 'playing';
+             console.log('[AUDIO] Воспроизведение началось');
+           };
+           
+           audio.onpause = function() {
+             currentState = 'paused';
+           };
+           
+           audio.onended = function() {
+             audio.currentTime = 0;
+             currentState = 'idle';
+           };
+           
+           audio.onerror = function() {
+             console.error('[AUDIO] Ошибка: ' + (audio.error ? audio.error.message : 'unknown'));
+             clearLoadTimeout();
+             if (retryCount < MAX_RETRIES && currentDialogId === dialogId) {
+               retryCount++;
+               console.log('[AUDIO] Повтор через 2s (' + retryCount + '/' + MAX_RETRIES + ')');
+               setTimeout(function() {
+                 play(dialogId, audioData);
+               }, RETRY_DELAY);
+             } else {
+               isLoading = false;
+               currentState = 'error';
+               if (audio) {
+                 audio.pause();
+                 audio = null;
+               }
+             }
+           };
+         })
+         .catch(function(err) {
+           console.error('[AUDIO] Ошибка загрузки: ' + err.message);
+           clearLoadTimeout();
+           if (retryCount < MAX_RETRIES && currentDialogId === dialogId) {
+             retryCount++;
+             setTimeout(function() {
+               play(dialogId, audioData);
+             }, RETRY_DELAY);
+           } else {
+             isLoading = false;
+             currentState = 'error';
+             alert('Ошибка загрузки аудио: ' + err.message);
+           }
+         });
         
         audio.onplaying = function() {
           currentState = 'playing';
@@ -1527,10 +1570,10 @@ AUDIO_PAGE_HTML = """<!doctype html>
           var progressDuration = control.querySelector('.progress-duration');
           var dialogId = control.dataset.dialogId;
           var date = control.dataset.date;
-          var store = control.dataset.store;
-          var start = control.dataset.start;
-          var end = control.dataset.end;
-          var sessionIds = control.dataset.sessionIds || '';
+           var store = control.dataset.store;
+           var start = control.dataset.start;
+           var end = control.dataset.end;
+           var sessionIds = control.dataset.sessionIds || control.getAttribute('data-session-ids') || '';
           
           // Play/Pause button
           if (playPauseBtn) {
@@ -1542,18 +1585,15 @@ AUDIO_PAGE_HTML = """<!doctype html>
                 return;
               }
               
-              var startTimeISO = date + 'T' + start.replace(/:/g, ':');
-              var endTimeISO = date + 'T' + end.replace(/:/g, ':');
-              
-              var url = '/audio/download?store=' + encodeURIComponent(store) + 
-                        '&start_time=' + encodeURIComponent(startTimeISO) + 
-                        '&end_time=' + encodeURIComponent(endTimeISO);
-              
-              if (sessionIds) {
-                url += '&session_ids=' + encodeURIComponent(sessionIds);
-              }
-              
-              AudioController.play(dialogId, url);
+               var startTimeISO = date + 'T' + start.replace(/:/g, ':');
+               var endTimeISO = date + 'T' + end.replace(/:/g, ':');
+               
+               var audioData = {
+                 date: date,
+                 sessionIds: sessionIds
+               };
+               
+               AudioController.play(dialogId, audioData);
             });
           }
           
