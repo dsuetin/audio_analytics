@@ -41,6 +41,8 @@ class OllamaClient:
                 {"role": "user", "content": user},
             ],
             "temperature": temperature,
+            "num_ctx": num_ctx,
+            "num_predict": num_predict,
         }
         # Отключаем thinking/reasoning для Qwen3.5 через chat_template_kwargs
         if not think:

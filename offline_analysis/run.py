@@ -250,6 +250,7 @@ def classify_segment(
     for attempt in range(retries + 1):
         try:
             text = format_segment_with_times(segment)
+            print("segment_text", text)
             parsed = _attempt_one_classification(client, segment, text, sales_snippet)
             parsed["segment_index"] = index
             if verbose:
@@ -743,7 +744,19 @@ def run(args) -> int:
     total_rows = sum(len(df) for _, df in sheets)
     store_rows = []
     for store_id, df in sheets:
+        # Фильтр по магазину
+        if args.store_filter and store_id != args.store_filter:
+            continue
         store_rows.append((store_id, df_to_rows(df)))
+    
+    if args.store_filter:
+        print(f"ФИЛЬТР: обрабатывается только магазин '{args.store_filter}'")
+        if not store_rows:
+            print(f"ОШИБКА: магазин '{args.store_filter}' не найден в данных")
+            print("Доступные магазины:")
+            for sid, _ in sheets:
+                print(f"  - {sid}")
+            return 1
     print(f"ASR-записей: {total_rows} (магазинов: {len(store_rows)})")
 
     all_segments: list[Segment] = []
@@ -980,6 +993,10 @@ def main() -> int:
     parser.add_argument(
         "--system-prompt", default=None,
         help="EXPERIMENT: путь к файлу с кастомным system prompt для segmentation",
+    )
+    parser.add_argument(
+        "--store-filter", default=None,
+        help="Фильтр по магазину: обработать только указанный магазин",
     )
     args = parser.parse_args()
 
