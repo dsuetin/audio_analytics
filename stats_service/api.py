@@ -1352,15 +1352,24 @@ AUDIO_PAGE_HTML = """<!doctype html>
            }
          };
          
-         // POST запрос для загрузки аудио
-         var formData = new FormData();
-         formData.append('date_str', audioData.date);
-         formData.append('session_ids', audioData.sessionIds);
-         
-         fetch('/api/audio/download-by-dialog', {
-           method: 'POST',
-           body: formData
-         })
+          // POST запрос для загрузки аудио
+          var formData = new FormData();
+          formData.append('date_str', audioData.date);
+          
+          if (audioData.sessionIds && audioData.sessionIds.trim() !== '') {
+            formData.append('session_ids', audioData.sessionIds);
+            console.log('[AUDIO] POST с session_ids:', audioData.sessionIds);
+          } else {
+            formData.append('store', audioData.store);
+            formData.append('start_time', audioData.start);
+            formData.append('end_time', audioData.end);
+            console.log('[AUDIO] POST с store/time:', audioData.store, audioData.start, audioData.end);
+          }
+          
+          fetch('/api/audio/download-by-dialog', {
+            method: 'POST',
+            body: formData
+          })
          .then(function(response) {
            if (!response.ok) {
              throw new Error('Download failed: ' + response.status);
@@ -1585,12 +1594,12 @@ AUDIO_PAGE_HTML = """<!doctype html>
                 return;
               }
               
-               var startTimeISO = date + 'T' + start.replace(/:/g, ':');
-               var endTimeISO = date + 'T' + end.replace(/:/g, ':');
-               
                var audioData = {
                  date: date,
-                 sessionIds: sessionIds
+                 sessionIds: sessionIds,
+                 store: store,
+                 start: start,
+                 end: end
                };
                
                AudioController.play(dialogId, audioData);
@@ -3556,47 +3565,115 @@ def download_audio(
 @app.post("/api/audio/download-by-dialog")
 def download_audio_by_dialog(
     date_str: str = Form(..., description="Date in YYYY-MM-DD format"),
-    session_ids: str = Form(..., description="Comma-separated session IDs"),
+    session_ids: str = Form(None, description="Comma-separated session IDs (optional)"),
+    store: str = Form(None, description="Store name (required if session_ids not provided)"),
+    start_time: str = Form(None, description="Start time HH:MM:SS (required if session_ids not provided)"),
+    end_time: str = Form(None, description="End time HH:MM:SS (required if session_ids not provided)"),
 ):
-    """Download audio for a specific dialog by session IDs"""
-    # Parse session IDs
-    session_list = [s.strip() for s in session_ids.split(",") if s.strip()]
-    if not session_list:
-        raise HTTPException(status_code=400, detail="No session IDs provided")
-
-    # Extract date from first session ID (format: YYYYMMDD-HHMMSS-...)
-    try:
-        first_session = session_list[0]
-        session_date = first_session.split("-")[0]
-        session_date_str = f"{session_date[:4]}-{session_date[4:6]}-{session_date[6:8]}"
-    except (IndexError, ValueError):
-        raise HTTPException(status_code=400, detail="Invalid session ID format")
-
+    """Download audio for a specific dialog by session IDs or store/time range"""
     s3_client = get_s3_client()
-
-    # Download and merge audio for all sessions
+    
+    # Parse date
+    try:
+        date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+        date_str_s3 = date_obj.strftime("%Y%m%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+    
+    # If session_ids provided, use them directly
+    if session_ids and session_ids.strip():
+        session_list = [s.strip() for s in session_ids.split(",") if s.strip()]
+        if not session_list:
+            raise HTTPException(status_code=400, detail="No valid session IDs provided")
+        
+        # Download and merge audio for all sessions
+        all_audio_data = []
+        for session_id in session_list:
+            try:
+                audio_data = download_session_chunks(s3_client, session_id)
+                if audio_data:
+                    all_audio_data.append(audio_data)
+            except Exception:
+                continue
+        
+        if not all_audio_data:
+            raise HTTPException(
+                status_code=404,
+                detail="No audio data available for the selected sessions",
+            )
+        
+        audio_buffer = merge_audio_sessions(all_audio_data)
+        audio_buffer.seek(0)
+        
+        safe_date = date_str.replace("-", "")
+        filename = f"audio_{safe_date}_dialog.wav"
+        
+        return Response(
+            content=audio_buffer.read(),
+            media_type="audio/wav",
+            headers={"Content-Disposition": f'inline; filename="{filename}"'},
+        )
+    
+    # Otherwise use store and time range (for manual dialogs)
+    if not store or not start_time or not end_time:
+        raise HTTPException(
+            status_code=400,
+            detail="Either session_ids or (store + start_time + end_time) must be provided"
+        )
+    
+    # Parse time range
+    try:
+        start_dt = datetime.strptime(f"{date_str}T{start_time}", "%Y-%m-%dT%H:%M:%S")
+        end_dt = datetime.strptime(f"{date_str}T{end_time}", "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid time format. Use HH:MM:SS")
+    
+    if start_dt >= end_dt:
+        raise HTTPException(status_code=400, detail="start_time must be before end_time")
+    
+    start_seconds = start_dt.hour * 3600 + start_dt.minute * 60 + start_dt.second
+    end_seconds = end_dt.hour * 3600 + end_dt.minute * 60 + end_dt.second
+    
+    # Get sessions for store
+    all_sessions = list_sessions_for_store(s3_client, date_str_s3, store)
+    
+    filtered_sessions = []
+    for session in all_sessions:
+        session_seconds = get_session_time_seconds(session)
+        if session_seconds is not None and start_seconds <= session_seconds < end_seconds:
+            filtered_sessions.append(session)
+    
+    if not filtered_sessions:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No audio sessions found for store '{store}' in time range {start_time} - {end_time}",
+        )
+    
+    # Download and merge audio
     all_audio_data = []
-    for session_id in session_list:
-        try:
-            audio_data = download_session_chunks(s3_client, session_id)
-            if audio_data:
-                all_audio_data.append(audio_data)
-        except Exception:
-            continue
-
+    for session_id in filtered_sessions:
+        audio_data = download_session_chunks(s3_client, session_id)
+        if audio_data:
+            all_audio_data.append(audio_data)
+    
     if not all_audio_data:
         raise HTTPException(
             status_code=404,
             detail="No audio data available for the selected sessions",
         )
-
+    
     audio_buffer = merge_audio_sessions(all_audio_data)
     audio_buffer.seek(0)
-
-    # Generate filename
-    safe_date = date_str.replace("-", "")
-    filename = f"audio_{safe_date}_dialog.wav"
-
+    
+    safe_store = store.replace(" ", "_").replace("/", "_").replace("\\", "_")
+    filename_ascii = ""
+    for char in safe_store:
+        if ord(char) < 128:
+            filename_ascii += char
+        else:
+            filename_ascii += "_"
+    filename = f"audio_{date_str_s3}_{filename_ascii}_{start_time.replace(':','-')}_to_{end_time.replace(':','-')}.wav"
+    
     return Response(
         content=audio_buffer.read(),
         media_type="audio/wav",
