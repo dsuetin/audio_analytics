@@ -1086,13 +1086,34 @@ AUDIO_PAGE_HTML = """<!doctype html>
   var audioPreview = null;
 
   function showError(message) {
+    console.log('[SHOWERROR] Вызов showError с сообщением:', message);
+    console.log('[SHOWERROR] alertBox:', alertBox);
+    console.log('[SHOWERROR] alertBox === null:', alertBox === null);
+    if (!alertBox) {
+      console.error('[SHOWERROR] alertBox не найден! Создаю элемент.');
+      alertBox = document.getElementById("alert");
+      if (!alertBox) {
+        console.error('[SHOWERROR] alertBox всё ещё null!');
+        alert('ОШИБКА: alertBox не найден');
+        return;
+      }
+    }
     alertBox.textContent = message;
+    alertBox.style.display = 'block';
+    alertBox.style.visibility = 'visible';
+    alertBox.style.opacity = '1';
     alertBox.classList.add("visible");
+    console.log('[SHOWERROR] Уведомление показано. alertBox.style.display:', alertBox.style.display);
+    alert(message);
   }
 
   function hideError() {
-    alertBox.classList.remove("visible");
+    if (alertBox) {
+      alertBox.classList.remove("visible");
+    }
   }
+
+  window.showError = showError;
 
   function formatDuration(seconds) {
     var mins = Math.floor(seconds / 60);
@@ -1142,16 +1163,19 @@ AUDIO_PAGE_HTML = """<!doctype html>
        }
       
       var dialogType = isManual ? d.dialog_type : getDialogTypeLabel(d.dialog_type);
-      var saleResult = isManual ? d.result : (d.is_sale ? "Покупка" : "Нет покупки");
-      var reasoning = d.model_reasoning || "Нет объяснения";
-      var reasoningEscaped = escapeHtml(reasoning);
-      var recognitionText = d.recognition_text || "Нет текста";
-      var recognitionTextEscaped = escapeHtml(recognitionText);
-      var commentKey = dateStr + '_' + d.store_id + '_' + d.client_id;
-      var existingComment = userComments[commentKey] || '';
-      var existingCommentEscaped = escapeHtml(existingComment);
-      
-       if (isManual) {
+       var saleResult = isManual ? d.result : (d.is_sale ? "Покупка" : "Нет покупки");
+       var reasoning = d.model_reasoning || "Нет объяснения";
+       var reasoningEscaped = escapeHtml(reasoning);
+       var recognitionText = d.recognition_text || "Нет текста";
+       var recognitionTextEscaped = escapeHtml(recognitionText);
+       // Для ручных диалогов используем manual_id, для обычных — client_id
+       var commentKey = isManual && d.manual_id 
+         ? dateStr + '_' + d.store_id + '_manual_' + d.manual_id
+         : dateStr + '_' + d.store_id + '_' + d.client_id;
+       var existingComment = userComments[commentKey] || '';
+       var existingCommentEscaped = escapeHtml(existingComment);
+       
+        if (isManual) {
         var sellerName = d.seller_id ? escapeHtml(d.seller_id.replace(/_/g, ' ')) : '—';
         html += '<table style="margin:0;border:2px solid #3b82f6;border-radius:8px;overflow:hidden;"><thead style="background:#dbeafe;"><tr>' +
           '<th>Магазин</th>' +
@@ -1307,22 +1331,22 @@ AUDIO_PAGE_HTML = """<!doctype html>
            return;
          }
          
-         // Check cache first
-         if (audioCache[dialogId] && audioCache[dialogId].audio) {
-           if (audio) {
-             audio.pause();
-           }
-           audio = audioCache[dialogId].audio;
-           currentDialogId = dialogId;
-           currentState = 'ready';
-           isLoading = false;
-           retryCount = 0;
-           audio.play().catch(function(err) {
-             currentState = 'error';
-             alert('Ошибка воспроизведения: ' + err.message);
-           });
-           return;
-         }
+          // Check cache first
+          if (audioCache[dialogId] && audioCache[dialogId].audio) {
+            if (audio) {
+              audio.pause();
+            }
+            audio = audioCache[dialogId].audio;
+            currentDialogId = dialogId;
+            currentState = 'ready';
+            isLoading = false;
+            retryCount = 0;
+            audio.play().catch(function(err) {
+              currentState = 'error';
+              window.showError('Ошибка воспроизведения: ' + err.message);
+            });
+            return;
+          }
          
          // Stop current audio if playing something else
          if (audio) {
@@ -1373,112 +1397,128 @@ AUDIO_PAGE_HTML = """<!doctype html>
             method: 'POST',
             body: formData
           })
-         .then(function(response) {
-           if (!response.ok) {
-             throw new Error('Download failed: ' + response.status);
-           }
-           return response.blob();
-         })
-          .then(function(blob) {
+          .then(function(response) {
             clearLoadTimeout();
-            console.log('[AUDIO] Blob size:', blob.size);
-            var audioUrl = window.URL.createObjectURL(blob);
-            console.log('[AUDIO] Creating Audio element');
-            audio = new Audio(audioUrl);
-            console.log('[AUDIO] Audio element created:', audio !== null);
-           
-           audio.onloadstart = function() {
-             isLoading = true;
-             currentState = 'loading';
-             console.log('[AUDIO] Загрузка началась');
-           };
-           
-           audio.onloadedmetadata = function() {
-             console.log('[AUDIO] Метаданные загружены, duration: ' + audio.duration);
-             if (currentDialogId === dialogId && currentState === 'loading') {
-               isLoading = false;
-               currentState = 'ready';
-               retryCount = 0;
-               audioCache[dialogId] = { audio: audio, duration: audio.duration };
-               audio.play().catch(function(err) {
-                 if (currentDialogId === dialogId) {
-                   currentState = 'error';
-                   alert('Ошибка воспроизведения: ' + err.message);
-                 }
-               });
-             }
-           };
-           
-           audio.oncanplay = function() {
-             if (currentState === 'loading') {
-               isLoading = false;
-               currentState = 'ready';
-               retryCount = 0;
-               audioCache[dialogId] = { audio: audio, duration: audio.duration };
-               if (currentDialogId === dialogId) {
-                 audio.play().catch(function(err) {
-                   if (currentDialogId === dialogId) {
-                     currentState = 'error';
-                     alert('Ошибка воспроизведения: ' + err.message);
-                   }
-                 });
-               }
-             }
-           };
-           
-           audio.onprogress = function() {
-             if (audio.buffered.length > 0 && audio.duration > 0) {
-               console.log('[AUDIO] Прогресс: ' + Math.round(audio.buffered.end(0) / audio.duration * 100) + '%');
-             }
-           };
-           
-           audio.onplaying = function() {
-             currentState = 'playing';
-             console.log('[AUDIO] Воспроизведение началось');
-           };
-           
-           audio.onpause = function() {
-             currentState = 'paused';
-           };
-           
-           audio.onended = function() {
-             audio.currentTime = 0;
-             currentState = 'idle';
-           };
-           
-           audio.onerror = function() {
-             console.error('[AUDIO] Ошибка: ' + (audio.error ? audio.error.message : 'unknown'));
-             clearLoadTimeout();
-             if (retryCount < MAX_RETRIES && currentDialogId === dialogId) {
-               retryCount++;
-               console.log('[AUDIO] Повтор через 2s (' + retryCount + '/' + MAX_RETRIES + ')');
-               setTimeout(function() {
-                 play(dialogId, audioData);
-               }, RETRY_DELAY);
-             } else {
-               isLoading = false;
-               currentState = 'error';
-               if (audio) {
-                 audio.pause();
-                 audio = null;
-               }
-             }
-           };
-         })
-         .catch(function(err) {
-           console.error('[AUDIO] Ошибка загрузки: ' + err.message);
-           clearLoadTimeout();
-           if (retryCount < MAX_RETRIES && currentDialogId === dialogId) {
-             retryCount++;
-             setTimeout(function() {
-               play(dialogId, audioData);
-             }, RETRY_DELAY);
-           } else {
-             isLoading = false;
-             currentState = 'error';
-             alert('Ошибка загрузки аудио: ' + err.message);
-           }
-         });
+            
+            if (!response.ok) {
+              if (response.status === 404) {
+                return response.text().then(function(errorText) {
+                  try {
+                    var errorData = JSON.parse(errorText);
+                    var errorMsg = errorData.detail || errorText;
+                    
+                    if (errorMsg && errorMsg.includes('No audio sessions found')) {
+                      console.log('[AUDIO] Аудиофайлы не найдены:', errorMsg);
+                      isLoading = false;
+                      currentState = 'idle';
+                      retryCount = 0;
+                      window.showError('За выбранный период аудиозаписи отсутствуют');
+                      return;
+                    }
+                  } catch (e) {
+                    console.error('[AUDIO] Ошибка парсинга ответа 404:', e);
+                  }
+                });
+              }
+              throw new Error('Download failed: ' + response.status);
+            }
+            return response.blob();
+          })
+           .then(function(blob) {
+             if (!blob) return;
+             console.log('[AUDIO] Blob size:', blob.size);
+             var audioUrl = window.URL.createObjectURL(blob);
+             console.log('[AUDIO] Creating Audio element');
+             audio = new Audio(audioUrl);
+             console.log('[AUDIO] Audio element created:', audio !== null);
+            
+            audio.onloadstart = function() {
+              isLoading = true;
+              currentState = 'loading';
+              console.log('[AUDIO] Загрузка началась');
+            };
+            
+            audio.onloadedmetadata = function() {
+              console.log('[AUDIO] Метаданные загружены, duration: ' + audio.duration);
+              if (currentDialogId === dialogId && currentState === 'loading') {
+                isLoading = false;
+                currentState = 'ready';
+                retryCount = 0;
+                audioCache[dialogId] = { audio: audio, duration: audio.duration };
+                audio.play().catch(function(err) {
+                  if (currentDialogId === dialogId) {
+                    currentState = 'error';
+                    window.showError('Ошибка воспроизведения: ' + err.message);
+                  }
+                });
+              }
+            };
+            
+            audio.oncanplay = function() {
+              if (currentState === 'loading') {
+                isLoading = false;
+                currentState = 'ready';
+                retryCount = 0;
+                audioCache[dialogId] = { audio: audio, duration: audio.duration };
+                if (currentDialogId === dialogId) {
+                  audio.play().catch(function(err) {
+                    if (currentDialogId === dialogId) {
+                      currentState = 'error';
+                      window.showError('Ошибка воспроизведения: ' + err.message);
+                    }
+                  });
+                }
+              }
+            };
+            
+            audio.onprogress = function() {
+              if (audio.buffered.length > 0 && audio.duration > 0) {
+                console.log('[AUDIO] Прогресс: ' + Math.round(audio.buffered.end(0) / audio.duration * 100) + '%');
+              }
+            };
+            
+            audio.onplaying = function() {
+              currentState = 'playing';
+              console.log('[AUDIO] Воспроизведение началось');
+            };
+            
+            audio.onpause = function() {
+              currentState = 'paused';
+            };
+            
+            audio.onended = function() {
+              audio.currentTime = 0;
+              currentState = 'idle';
+            };
+            
+            audio.onerror = function() {
+              console.error('[AUDIO] Ошибка: ' + (audio.error ? audio.error.message : 'unknown'));
+              clearLoadTimeout();
+              if (retryCount < MAX_RETRIES && currentDialogId === dialogId) {
+                retryCount++;
+                console.log('[AUDIO] Повтор через 2s (' + retryCount + '/' + MAX_RETRIES + ')');
+                setTimeout(function() {
+                  play(dialogId, audioData);
+                }, RETRY_DELAY);
+              } else {
+                isLoading = false;
+                currentState = 'error';
+                if (audio) {
+                  audio.pause();
+                  audio = null;
+                }
+                window.showError('Ошибка воспроизведения аудио');
+              }
+            };
+          })
+            .catch(function(err) {
+              console.error('[AUDIO] Ошибка загрузки: ' + err.message);
+              clearLoadTimeout();
+              isLoading = false;
+              currentState = 'error';
+              retryCount = 0;
+              window.showError('Ошибка загрузки аудио: ' + err.message);
+            });
         
         audio.onplaying = function() {
           currentState = 'playing';
@@ -1526,7 +1566,7 @@ AUDIO_PAGE_HTML = """<!doctype html>
             
             if (currentDialogId === dialogId) {
               console.error('[AUDIO] Не удалось загрузить аудио после ' + MAX_RETRIES + ' попыток');
-              alert('Не удалось загрузить аудио. Проверьте подключение к интернету.');
+              window.showError('Не удалось загрузить аудио. Проверьте подключение к интернету.');
             }
           }
         };
@@ -1539,14 +1579,14 @@ AUDIO_PAGE_HTML = """<!doctype html>
         }
       }
       
-      function resume() {
-        if (audio && currentState === 'paused') {
-          audio.play().catch(function(err) {
-            currentState = 'error';
-            alert('Ошибка воспроизведения: ' + err.message);
-          });
-        }
-      }
+        function resume() {
+         if (audio && currentState === 'paused') {
+           audio.play().catch(function(err) {
+             currentState = 'error';
+             window.showError('Ошибка воспроизведения: ' + err.message);
+           });
+         }
+       }
       
       function isCurrentDialog(dialogId) {
         return currentDialogId === dialogId;
