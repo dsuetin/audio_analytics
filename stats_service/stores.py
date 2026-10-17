@@ -83,10 +83,20 @@ def normalize_store_for_comparison(store_id: str) -> str:
     return store_id
 
 
+def normalize_store_id(store_id: str) -> str:
+    """
+    Normalize store_id for comparison.
+    Handles variations like 'ул.' vs 'ул' (with/without dot).
+    """
+    # Replace 'ул.' with 'ул' for consistent comparison
+    normalized = store_id.replace('ул.', 'ул')
+    return normalized
+
+
 def match_store_id(report_store_id: str, filter_store_id: str) -> bool:
     """
     Check if a store_id from report matches the filter store_id.
-    Handles both full and truncated store names.
+    Handles both full and truncated store names, as well as variations like 'ул.' vs 'ул'.
     
     CRITICAL: Does NOT allow ambiguous matches. If a truncated store_id
     could match multiple full store names (e.g., "...37" could be "...37" or "...378"),
@@ -101,6 +111,10 @@ def match_store_id(report_store_id: str, filter_store_id: str) -> bool:
     """
     # Exact match always wins
     if report_store_id == filter_store_id:
+        return True
+    
+    # Try normalized match (handles 'ул.' vs 'ул' variations)
+    if normalize_store_id(report_store_id) == normalize_store_id(filter_store_id):
         return True
     
     # Try to resolve truncated report_store_id to full name

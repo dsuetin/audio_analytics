@@ -12,7 +12,7 @@ import pandas as pd
 
 from fastapi import FastAPI, HTTPException, Query, Form
 from fastapi.responses import FileResponse, HTMLResponse, Response
-from stats_service.stores import get_all_stores, match_store_id
+from stats_service.stores import get_all_stores, match_store_id, normalize_store_id, get_full_store
 
 app = FastAPI(title="Stats Service")
 
@@ -93,13 +93,16 @@ def extract_store_id_from_session(session_id: str) -> str | None:
 def list_sessions_for_store(s3_client, date_str: str, store_name: str):
     """List all sessions for a store on a given date.
     
-    Uses exact store_id matching by extracting store_id from session_id.
-    This prevents false matches when store names share common prefixes
-    (e.g., "...37" matching both "...37" and "...378").
+    Uses match_store_id() for comparison to handle:
+    - Full vs truncated store names (e.g., "...62_А" vs "...62_")
+    - Variations like 'ул.' vs 'ул' (with/without dot)
     """
     date_prefix = f"audio/{date_str}"
     sessions = []
 
+    # Try to get full store name if truncated version is provided
+    full_store_name = get_full_store(store_name) or store_name
+    
     paginator = s3_client.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=S3_BUCKET, Prefix=date_prefix):
         if "Contents" in page:
@@ -108,9 +111,9 @@ def list_sessions_for_store(s3_client, date_str: str, store_name: str):
                 parts = key.split("/")
                 if len(parts) >= 2:
                     session = parts[1]
-                    # Extract store_id from session_id exactly
+                    # Extract store_id from session_id
                     session_store_id = extract_store_id_from_session(session)
-                    if session_store_id and session_store_id == store_name:
+                    if session_store_id and match_store_id(session_store_id, full_store_name):
                         if session not in sessions:
                             sessions.append(session)
 
