@@ -117,31 +117,40 @@ class ASRWorker:
 
         started = time.perf_counter()
 
-        # async S3 read (НЕ блокируем event loop)
-        audio = await self.get_s3_object(s3_key)
-        pcm = wav_to_pcm(audio)
+        try:
+            # async S3 read (НЕ блокируем event loop)
+            audio = await self.get_s3_object(s3_key)
+            pcm = wav_to_pcm(audio)
 
-        # buffer insert (ordering + reassembly)
-        await self.buffer.add(
-            session_id=session_id,
-            chunk_id=chunk_id,
-            data=pcm,
-            is_end=is_end,
-        )
+            # buffer insert (ordering + reassembly)
+            await self.buffer.add(
+                session_id=session_id,
+                chunk_id=chunk_id,
+                data=pcm,
+                is_end=is_end,
+            )
 
-        # dispatch session processing
-        self._schedule_session(session_id)
+            # dispatch session processing
+            self._schedule_session(session_id)
 
-        elapsed_ms = (time.perf_counter() - started) * 1000
+            elapsed_ms = (time.perf_counter() - started) * 1000
 
-        logger.debug(
-            "s3_read session=%s chunk=%s is_end=%s bytes=%s time_ms=%.2f",
-            session_id,
-            chunk_id,
-            is_end,
-            len(audio),
-            elapsed_ms,
-        )
+            logger.debug(
+                "s3_read session=%s chunk=%s is_end=%s bytes=%s time_ms=%.2f",
+                session_id,
+                chunk_id,
+                is_end,
+                len(audio),
+                elapsed_ms,
+            )
+        except Exception as e:
+            logger.error(
+                "Failed to process audio event: session=%s chunk=%s s3_key=%s error=%s",
+                session_id,
+                chunk_id,
+                s3_key,
+                str(e),
+            )
 
     # ----------------------------
     # session scheduler

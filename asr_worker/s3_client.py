@@ -1,4 +1,5 @@
 import boto3
+from botocore.exceptions import ClientError
 
 
 class S3Client:
@@ -12,5 +13,14 @@ class S3Client:
         self.bucket = bucket
 
     def get_object(self, key: str) -> bytes:
-        obj = self.s3.get_object(Bucket=self.bucket, Key=key)
-        return obj["Body"].read()
+        try:
+            obj = self.s3.get_object(Bucket=self.bucket, Key=key)
+            return obj["Body"].read()
+        except ClientError as e:
+            error_code = e.response.get("Error", {}).get("Code", "Unknown")
+            if error_code == "NoSuchKey":
+                raise FileNotFoundError(f"Object not found: {key}") from e
+            elif error_code == "NoSuchBucket":
+                raise FileNotFoundError(f"Bucket not found: {self.bucket}") from e
+            else:
+                raise

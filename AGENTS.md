@@ -123,11 +123,18 @@ python3 offline_analysis/batch_run.py
 # эксперимент sales ground truth (08-27):
 python3 offline_analysis/run.py --sales-ground-truth "reports/Документы продаж за 27.08.2026г.xlsx"
 
+# прямая классификация сегмента (без сегментации, точная копия механизма из run.py):
+python3 scripts/direct_classification.py \
+  --text "10:43:28 | текст..." \
+  --store "г_Армавир_ул_Советской_Армии_37"
+
 # валидация:
 python3 scripts/validate_finals.py
 python3 scripts/validate_pdfs.py
 python3 scripts/summary.py
 ```
+
+**Важно**: `seller_id` больше не влияет на результат классификации (исправлено 2026-10-16). Параметр `--seller` опционален.
 
 ## Конвейер offline
 

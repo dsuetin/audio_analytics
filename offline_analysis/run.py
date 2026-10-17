@@ -250,7 +250,6 @@ def classify_segment(
     for attempt in range(retries + 1):
         try:
             text = format_segment_with_times(segment)
-            print("segment_text", text)
             parsed = _attempt_one_classification(client, segment, text, sales_snippet)
             parsed["segment_index"] = index
             if verbose:
