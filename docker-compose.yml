@@ -48,6 +48,8 @@ services:
     container_name: redpanda
     networks:
       - speech
+    mem_limit: 2G
+    memswap_limit: 2G
     command:
       - redpanda
       - start
@@ -83,6 +85,8 @@ services:
     image: minio/minio:latest
     container_name: minio
 
+    mem_limit: 4G
+    memswap_limit: 4G
     command: server /data --console-address ":9001"
     networks:
       - speech
@@ -109,6 +113,8 @@ services:
       dockerfile: storage_worker/Dockerfile
 
     container_name: storage-worker
+    mem_limit: 2G
+    memswap_limit: 2G
     networks:
       - speech
     depends_on:
@@ -134,6 +140,8 @@ services:
   console:
     image: docker.redpanda.com/redpandadata/console:latest
     container_name: redpanda-console
+    mem_limit: 512M
+    memswap_limit: 1G
     ports:
       - "8080:8080"
     environment:
@@ -152,6 +160,8 @@ services:
       - ./client:/app/client
       # - ./proto:/app/proto
     container_name: vad-client
+    mem_limit: 512M
+    memswap_limit: 1G
     networks:
       - speech
     depends_on:
@@ -172,7 +182,8 @@ services:
       dockerfile: asr_worker/Dockerfile
 
     container_name: asr_worker
-
+    mem_limit: 8G
+    memswap_limit: 8G
     networks:
       - speech
 
@@ -197,6 +208,8 @@ services:
   postgres:
     image: postgres:16
     container_name: postgres
+    mem_limit: 4G
+    memswap_limit: 4G
     networks:
       - speech
     environment:
@@ -213,6 +226,8 @@ services:
   pgadmin:
     image: dpage/pgadmin4
     container_name: pgadmin
+    mem_limit: 1G
+    memswap_limit: 2G
     networks:
       - speech
     environment:
@@ -227,6 +242,8 @@ services:
   asr:
     image: asr:latest
     container_name: triton-asr
+    mem_limit: 8G
+    memswap_limit: 8G
     networks:
       - speech
     environment:
@@ -247,6 +264,8 @@ services:
     networks:
       - speech
     container_name: server_triton-speech-segmentation
+    mem_limit: 8G
+    memswap_limit: 8G
     ulimits:
       memlock: -1
       stack: -1
@@ -288,7 +307,8 @@ services:
       dockerfile: classification/Dockerfile
 
     container_name: classification-service
-
+    mem_limit: 1G
+    memswap_limit: 2G
     networks:
       - speech
 
@@ -318,6 +338,8 @@ services:
     <<: *daily-stats
     image: audio_analytics-daily_stats_service:latest
     container_name: daily-stats-scheduler
+    mem_limit: 2G
+    memswap_limit: 2G
     command: ["python3", "-m", "stats_service.scheduler"]
 
     restart: unless-stopped
@@ -326,6 +348,8 @@ services:
     <<: *daily-stats
     image: audio_analytics-daily_stats_service:latest
     container_name: daily-stats-api
+    mem_limit: 2G
+    memswap_limit: 2G
     command:
       - uvicorn
       - stats_service.api:app
@@ -353,6 +377,8 @@ services:
     <<: *daily-stats
     image: audio_analytics-daily_stats_service:latest
     container_name: daily-stats-api-test
+    mem_limit: 2G
+    memswap_limit: 2G
     command:
       - uvicorn
       - stats_service.api:app
@@ -396,7 +422,8 @@ services:
       - .env
 
     container_name: alert-service
-
+    mem_limit: 4G
+    memswap_limit: 4G
     networks:
       - speech
 
