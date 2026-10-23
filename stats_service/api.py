@@ -2803,24 +2803,25 @@ MIC_MONITORING_HTML = """<!doctype html>
       color: var(--muted);
     }
     .monitoring-list {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      display: flex;
+      flex-direction: column;
       gap: 12px;
     }
     .monitoring-item {
       display: flex;
-      align-items: center;
+      align-items: flex-start;
       gap: 12px;
-      padding: 10px 12px;
+      padding: 12px 14px;
       background: #f9fafb;
       border-radius: 8px;
       font-size: 14px;
     }
     .monitoring-indicator {
-      width: 12px;
-      height: 12px;
+      width: 14px;
+      height: 14px;
       border-radius: 50%;
       flex-shrink: 0;
+      margin-top: 2px;
     }
     .monitoring-indicator.active {
       background: #10b981;
@@ -2840,18 +2841,24 @@ MIC_MONITORING_HTML = """<!doctype html>
       0%, 100% { opacity: 1; }
       50% { opacity: 0.5; }
     }
-    .monitoring-store {
+    .monitoring-content {
       flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .monitoring-store {
       font-weight: 500;
       color: var(--text);
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
+      font-size: 15px;
+    }
+    .monitoring-seller {
+      font-size: 13px;
+      color: var(--muted);
     }
     .monitoring-time {
       font-size: 12px;
       color: var(--muted);
-      white-space: nowrap;
     }
     .monitoring-error {
       text-align: center;
@@ -2925,10 +2932,14 @@ MIC_MONITORING_HTML = """<!doctype html>
       var store = data[i];
       var statusClass = store.active ? "active" : "inactive";
       var timeStr = formatMonitoringTime(store.last_audio_at);
+      var sellerName = store.seller_id ? store.seller_id.replace(/_/g, ' ') : 'Не определён';
       html += '<div class="monitoring-item">';
       html += '<div class="monitoring-indicator ' + statusClass + '"></div>';
+      html += '<div class="monitoring-content">';
       html += '<div class="monitoring-store" title="' + store.store_id.replace(/"/g, "&quot;") + '">' + store.store_id.replace(/</g, "&lt;") + '</div>';
-      html += '<div class="monitoring-time">' + timeStr + '</div>';
+      html += '<div class="monitoring-seller">Консультант: ' + sellerName.replace(/</g, "&lt;") + '</div>';
+      html += '<div class="monitoring-time">Последнее обновление: ' + timeStr + '</div>';
+      html += '</div>';
       html += '</div>';
     }
     if (list) {
@@ -3428,7 +3439,8 @@ async def get_monitoring_status():
                 """
                 SELECT
                     store_id,
-                    MAX(created_at) AS last_audio_at
+                    MAX(created_at) AS last_audio_at,
+                    (ARRAY_AGG(seller_id ORDER BY created_at DESC))[1] AS last_seller_id
                 FROM transcripts
                 WHERE created_at >= $1
                 GROUP BY store_id
@@ -3440,7 +3452,8 @@ async def get_monitoring_status():
                 """
                 SELECT
                     store_id,
-                    MAX(created_at) AS last_audio_at
+                    MAX(created_at) AS last_audio_at,
+                    (ARRAY_AGG(seller_id ORDER BY created_at DESC))[1] AS last_seller_id
                 FROM transcripts
                 GROUP BY store_id
                 """
@@ -3448,26 +3461,28 @@ async def get_monitoring_status():
         finally:
             await conn.close()
         
-        active_stores = {record["store_id"]: record["last_audio_at"] for record in active_records}
-        all_last_audio = {record["store_id"]: record["last_audio_at"] for record in all_last_audio_records}
+        active_stores = {record["store_id"]: {"last_audio_at": record["last_audio_at"], "seller_id": record["last_seller_id"]} for record in active_records}
+        all_last_audio = {record["store_id"]: {"last_audio_at": record["last_audio_at"], "seller_id": record["last_seller_id"]} for record in all_last_audio_records}
         
         result = []
         for store in all_stores:
             if store in active_stores:
-                last_audio_at = active_stores[store]
+                store_data = active_stores[store]
                 result.append({
                     "store_id": store,
                     "store_name": store,
                     "active": True,
-                    "last_audio_at": last_audio_at.isoformat() if last_audio_at else None,
+                    "last_audio_at": store_data["last_audio_at"].isoformat() if store_data["last_audio_at"] else None,
+                    "seller_id": store_data["seller_id"],
                 })
             else:
-                last_known_audio_at = all_last_audio.get(store)
+                store_data = all_last_audio.get(store, {})
                 result.append({
                     "store_id": store,
                     "store_name": store,
                     "active": False,
-                    "last_audio_at": last_known_audio_at.isoformat() if last_known_audio_at else None,
+                    "last_audio_at": store_data["last_audio_at"].isoformat() if store_data.get("last_audio_at") else None,
+                    "seller_id": store_data.get("seller_id"),
                 })
         
         return result
