@@ -80,6 +80,12 @@
 
 ## DONE (история, не активные)
 
+- [x] **Механизм объединения связанных сегментов (2026-10-22):** реализован `segment_merge.py`
+  с функциями `find_merge_candidates()`, `merge_segments()`, `generate_merge_report()`.
+  Интегрирован в `run.py` через флаг `--segment-merge` (по умолчанию ВЫКЛЮЧЕНО).
+  Тесты на эталонных отчётах (2026-10-02, 2026-10-11): 0 изменений, регрессии нет.
+  Правила консервативные: не объединять сегменты, идущие подряд (gap=0), не объединять
+  сегменты с промежуточными сегментами между ними. Скрипт тестирования: `scripts/test_segment_merge.py`.
 - [x] **Итерации сегментации 2026-09-03 (segmentation-only):** root-cause по SPLIT
   (`regression_0903/split_analysis_iter01.*`, `overlap_check.py`), две попытки фикса —
   **iter_04** (prompt SPLIT-protection, REGRESSED → reverted) и **iter_04b** (merge-only

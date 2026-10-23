@@ -52,6 +52,12 @@ from offline_analysis.segmentation import (
     measure_rows,
     segment_rows,
 )
+# Segment merging (EXPERIMENT: off by default)
+from offline_analysis.segment_merge import (
+    find_merge_candidates,
+    merge_segments,
+    generate_merge_report,
+)
 # EXPERIMENT: sales ground-truth (off by default; enabled via --sales-ground-truth)
 from offline_analysis import sales_gt as _sales
 from offline_analysis.taxonomy import (
@@ -444,6 +450,7 @@ def write_debug(
         },
         "dialog_duration_metrics": duration_metrics(segments),
         "re_long_split": (extra or {}).get("re_long_split"),
+        "segment_merge": (extra or {}).get("segment_merge"),
         "segments": items,
         "rejected_details": rejected,
     }
@@ -735,6 +742,7 @@ def run(args) -> int:
     print(f"retries      : {args.retries}")
     print(f"confidence_min: {args.confidence_min}")
     print(f"resplit_long : {'on' if args.resplit else 'off (default; holistic prompt handles it)'}")
+    print(f"segment_merge: {'on (threshold={args.segment_merge_threshold}s)' if args.segment_merge else 'off'}")
     print(f"input        : {input_file}")
     print(f"output       : {output_file}")
     print(f"output_pdf   : {output_pdf}")
@@ -788,6 +796,28 @@ def run(args) -> int:
             sales_snippet=_store_snippet,
             system_prompt=_system_prompt,
         )
+        
+        # SEGMENT MERGING (EXPERIMENT: off by default)
+        if args.segment_merge:
+            merge_groups, merge_metrics = find_merge_candidates(
+                segments,
+                time_threshold_sec=args.segment_merge_threshold,
+                analyze_only=False,
+            )
+            if merge_groups:
+                segments, merge_info = merge_segments(
+                    segments,
+                    merge_groups,
+                    apply_merge=True,
+                )
+                if not args.quiet:
+                    print(f"\n[SEGMENT-MERGE] {len(merge_groups)} объединений применено")
+                    print(f"  groups: {len(merge_groups)}")
+                    print(f"  merged: {merge_info.get('merged_count', 0)}")
+            else:
+                if not args.quiet:
+                    print(f"\n[SEGMENT-MERGE] Кандидатов на объединение не найдено")
+        
         all_segments.extend(segments)
     print(f"Сегментация: {len(all_segments)} сегментов дня")
 
@@ -877,7 +907,10 @@ def run(args) -> int:
     write_excel(final_rows, output_file)
     write_debug(
         all_segments, all_results, rejected, total_rows, day_size, debug_path,
-        extra={"re_long_split": resplit_sink or None},
+        extra={
+            "re_long_split": resplit_sink or None,
+            "segment_merge": getattr(args, 'segment_merge', False),
+        },
     )
     if args.debug_dir:
         Path(args.debug_dir).mkdir(parents=True, exist_ok=True)
@@ -996,6 +1029,14 @@ def main() -> int:
     parser.add_argument(
         "--store-filter", default=None,
         help="Фильтр по магазину: обработать только указанный магазин",
+    )
+    parser.add_argument(
+        "--segment-merge", action="store_true",
+        help="EXPERIMENT: включить объединение связанных сегментов (по умолчанию ВЫКЛЮЧЕНО)",
+    )
+    parser.add_argument(
+        "--segment-merge-threshold", type=float, default=10.0,
+        help="EXPERIMENT: порог разрыва в секундах для объединения сегментов (по умолчанию 10.0)",
     )
     args = parser.parse_args()
 
