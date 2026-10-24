@@ -742,7 +742,11 @@ def run(args) -> int:
     print(f"retries      : {args.retries}")
     print(f"confidence_min: {args.confidence_min}")
     print(f"resplit_long : {'on' if args.resplit else 'off (default; holistic prompt handles it)'}")
-    print(f"segment_merge: {'on (threshold={args.segment_merge_threshold}s)' if args.segment_merge else 'off'}")
+    if not getattr(args, 'no_segment_merge', False):
+        merge_mode = "LLM" if getattr(args, 'segment_merge_llm', False) else "heuristic"
+        print(f"segment_merge: on ({merge_mode}, threshold={args.segment_merge_threshold}s)")
+    else:
+        print(f"segment_merge: off")
     print(f"input        : {input_file}")
     print(f"output       : {output_file}")
     print(f"output_pdf   : {output_pdf}")
@@ -770,6 +774,7 @@ def run(args) -> int:
     all_results: dict[int, dict] = {}
     day_size = {"rows": 0, "characters": 0, "estimated_tokens": 0}
     resplit_sink: dict = {}
+    merge_sink: dict = {}
     for store_id, rows in store_rows:
         size = measure_rows(rows)
         log_size(f"STORE {store_id}", size)
@@ -797,26 +802,59 @@ def run(args) -> int:
             system_prompt=_system_prompt,
         )
         
-        # SEGMENT MERGING (EXPERIMENT: off by default)
-        if args.segment_merge:
-            merge_groups, merge_metrics = find_merge_candidates(
-                segments,
-                time_threshold_sec=args.segment_merge_threshold,
-                analyze_only=False,
-            )
-            if merge_groups:
-                segments, merge_info = merge_segments(
-                    segments,
-                    merge_groups,
-                    apply_merge=True,
+        # SEGMENT MERGING (heuristic by default, can be disabled with --no-segment-merge)
+        if not getattr(args, 'no_segment_merge', False):
+            if getattr(args, 'segment_merge_llm', False):
+                # LLM-based merging
+                from offline_analysis.segment_merge_llm import (
+                    find_merge_candidates_llm,
+                    merge_segments as merge_segments_llm,
                 )
-                if not args.quiet:
-                    print(f"\n[SEGMENT-MERGE] {len(merge_groups)} объединений применено")
-                    print(f"  groups: {len(merge_groups)}")
-                    print(f"  merged: {merge_info.get('merged_count', 0)}")
+                
+                merge_groups, merge_metrics = find_merge_candidates_llm(
+                    segments,
+                    llm=client,
+                    time_threshold_sec=args.segment_merge_threshold,
+                    min_confidence=args.segment_merge_min_confidence,
+                )
+                
+                if merge_groups:
+                    segments, merge_info = merge_segments_llm(
+                        segments, merge_groups, apply_merge=True,
+                    )
+                    if not args.quiet:
+                        print(f"\n[SEGMENT-MERGE-LLM] {len(merge_groups)} объединений применено")
+                        print(f"  LLM-вызовов: {merge_metrics.get('llm_calls', 0)}")
+                        print(f"  кандидатов: {merge_metrics.get('candidates_found', 0)}")
+                    
+                    merge_sink["applied"] = True
+                    merge_sink["llm_based"] = True
+                    merge_sink["groups_count"] = len(merge_groups)
+                    merge_sink["llm_calls"] = merge_metrics.get("llm_calls", 0)
+                else:
+                    if not args.quiet:
+                        print(f"\n[SEGMENT-MERGE-LLM] Кандидатов не найдено")
+                    merge_sink["applied"] = False
+                    merge_sink["llm_based"] = True
             else:
-                if not args.quiet:
-                    print(f"\n[SEGMENT-MERGE] Кандидатов на объединение не найдено")
+                # Heuristic-based merging
+                merge_groups, merge_metrics = find_merge_candidates(
+                    segments,
+                    time_threshold_sec=args.segment_merge_threshold,
+                    analyze_only=False,
+                )
+                if merge_groups:
+                    segments, merge_info = merge_segments(
+                        segments, merge_groups, apply_merge=True,
+                    )
+                    if not args.quiet:
+                        print(f"\n[SEGMENT-MERGE] {len(merge_groups)} объединений применено")
+                    
+                    merge_sink["applied"] = True
+                    merge_sink["llm_based"] = False
+                else:
+                    if not args.quiet:
+                        print(f"\n[SEGMENT-MERGE] Кандидатов не найдено")
         
         all_segments.extend(segments)
     print(f"Сегментация: {len(all_segments)} сегментов дня")
@@ -909,7 +947,11 @@ def run(args) -> int:
         all_segments, all_results, rejected, total_rows, day_size, debug_path,
         extra={
             "re_long_split": resplit_sink or None,
-            "segment_merge": getattr(args, 'segment_merge', False),
+            "segment_merge": {
+                "enabled": getattr(args, 'segment_merge', False),
+                "llm_based": getattr(args, 'segment_merge_llm', False),
+                "details": merge_sink or None,
+            },
         },
     )
     if args.debug_dir:
@@ -1031,12 +1073,20 @@ def main() -> int:
         help="Фильтр по магазину: обработать только указанный магазин",
     )
     parser.add_argument(
-        "--segment-merge", action="store_true",
-        help="EXPERIMENT: включить объединение связанных сегментов (по умолчанию ВЫКЛЮЧЕНО)",
+        "--no-segment-merge", action="store_true",
+        help="Отключить объединение связанных сегментов (по умолчанию ВКЛЮЧЕНО - heuristic)",
     )
     parser.add_argument(
         "--segment-merge-threshold", type=float, default=10.0,
         help="EXPERIMENT: порог разрыва в секундах для объединения сегментов (по умолчанию 10.0)",
+    )
+    parser.add_argument(
+        "--segment-merge-min-confidence", type=float, default=0.4,
+        help="EXPERIMENT: минимальная уверенность для предложения объединения (по умолчанию 0.4)",
+    )
+    parser.add_argument(
+        "--segment-merge-llm", action="store_true",
+        help="EXPERIMENT: использовать LLM для принятия решений об объединении (вместо эвристик)",
     )
     args = parser.parse_args()
 
