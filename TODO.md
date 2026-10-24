@@ -28,11 +28,14 @@
      Решение: добавлен seed=42 в llm.py, обновлён prompt для employee (короткие фразы без клиента).
      Результат: segment_034 (ВЛКСМ 15:58:35) теперь правильно классифицируется как employee.
      Отчёт: `reports/test_merve/final_transcript_report_2026-10-20_vlksm_llm_v6_employee_prompt.xlsx`.
-- [x] **Segmentation prompt для вопросов о стиле вождения (2026-10-23, v12).**
-     Проблема: segment с вопросами "сколько в год проезжаете" классифицировался как employee.
-     Решение: добавлен признак в segmentation prompt (prompt.py:155-163).
-     Результат: 13→14 строк (как в GT), segment_028 (15:23:14) теперь customer.
-     Отчёт: `reports/test_merve/final_transcript_report_2026-10-20_vlksm_llm_v12_driving_style_seg.xlsx`.
+- [ ] **Segmentation prompt для вопросов о стиле вождения (2026-10-23, v12-v17).**
+     Проблема: segment с вопросами "сколько в год проезжаете" классифицируется как employee.
+     Решение: добавлены правила в segmentation prompt (prompt.py:155-175, 557-571).
+     Результат v12: 13→14 строк (как в GT), segment_028 (15:23:14) customer.
+     Результат v17: 13 строк, телефон (15:23:14) теперь unknown, но вопрос о пробеге (15:39:00) всё ещё employee.
+     Проблема: segmentation LLM игнорирует правила про вопросы о пробеге (confidence 0.9 employee).
+     Classification LLM правильно видит это как customer (confidence 0.75).
+     Отчёт: `reports/test_merve/final_transcript_report_2026-10-20_vlksm_llm_v17_critical_end.xlsx`.
 - [ ] **Построить корректное сопоставление GT-продаж с клиентскими миссиями (08-27).**
   Подход (без `client_id`): `store_id` + время продажи + содержание транскрипции →
   поиск клиентской миссии → проверка сегментации → проверка `is_sale`.
@@ -59,6 +62,11 @@
    GT: 09:52:43-09:53:36 (buy) и 10:15:22-10:18:28 (service) — два разных диалога.
    v12: объединены в 09:52:43-10:18:28 (service), 10:15:22 пропущен.
    Нужно: отключить merge для этих сегментов или уменьшить threshold.
+- [ ] **Исправить segmentation LLM для вопросов о пробеге (15:39:00 ВЛКСМ 20.10.2026).**
+   Проблема: segment_029 (15:39:00-15:43:42) содержит вопрос "сколько в за год проезжаете" но segmentation LLM классифицирует как employee (confidence 0.9).
+   Classification LLM правильно видит это как customer (confidence 0.75, mission=Купить).
+   Prompt обновлён 5 раз (v12-v17), но segmentation LLM игнорирует правила.
+   Нужно: попробовать few-shot примеры или другой подход к prompt.
 
 ## P1 (следующие — структура и стабильность качества)
 

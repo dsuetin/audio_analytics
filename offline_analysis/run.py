@@ -876,6 +876,25 @@ def run(args) -> int:
             f">90м={dur_metrics['gt_90min']} >120м={dur_metrics['gt_120min']}"
         )
 
+    # FIX: employee сегменты с вопросами о пробеге → dialog
+    # Фразы "сколько в год проезжаете", "сколько ездите" — это вопрос продавца КЛИЕНТУ
+    # Сотрудники друг другу таких вопросов не задают
+    driving_style_keywords = [
+        "сколько в год проезжаете",
+        "сколько ездите",
+        "как водите",
+        "пробег какой",
+        "сколько проезжаете",
+    ]
+    for seg in all_segments:
+        if seg.segment_type == "employee" and seg.text:
+            text_lower = seg.text.lower()
+            for keyword in driving_style_keywords:
+                if keyword.lower() in text_lower:
+                    print(f"[FIX] {seg.segment_id}: employee → dialog (вопрос клиенту о пробеге)")
+                    seg.segment_type = "dialog"
+                    break
+
     # 2) CLASSIFICATION ТОЛЬКО dialog-сегментов (после segmentation)
     targets = [
         (idx, seg) for idx, seg in enumerate(all_segments) if seg.segment_type == "dialog"
