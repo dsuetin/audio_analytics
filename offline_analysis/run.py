@@ -822,6 +822,74 @@ def run(args) -> int:
         if fixed_background > 0:
             print(f"[FIX] Магазин {store_id}: объединено {fixed_background} background сегментов")
         
+        # FIX: длинные сегменты с "добрый день" внутри → разбить на несколько
+        # Пример: сегмент 43 мин с "добрый день здравствуйте" посередине = 2-3 клиента
+        split_long_segments = 0
+        new_segments = []
+        for seg in segments:
+            if seg.segment_type == "dialog" and seg.rows:
+                duration = (seg.rows[-1].created_at - seg.rows[0].created_at).total_seconds()
+                if duration > 1200:  # > 20 минут
+                    # Ищем "добрый день" или "здравствуйте" внутри текста
+                    text_lower = seg.text.lower()
+                    greeting = None
+                    greeting_pos = None
+                    for g in ["добрый день", "здравствуйте"]:
+                        pos = text_lower.find(g)
+                        if pos != -1:
+                            greeting = g
+                            greeting_pos = pos
+                            break
+                    
+                    if greeting_pos and greeting_pos > 500:  # не в начале сегмента
+                        # Находим строку, где находится приветствие
+                        split_idx = 0
+                        current_pos = 0
+                        for i, row in enumerate(seg.rows):
+                            if current_pos <= greeting_pos < current_pos + len(row.text):
+                                split_idx = i
+                                break
+                            current_pos += len(row.text) + 1
+                        
+                        if split_idx > 0 and split_idx < len(seg.rows) - 1:
+                            # Создаём два сегмента
+                            seg1_rows = seg.rows[:split_idx]
+                            seg2_rows = seg.rows[split_idx:]
+                            
+                            seg1 = type(seg)(
+                                segment_id=f"{seg.segment_id}_part1",
+                                store_id=seg.store_id,
+                                start_index=seg.rows[0].index,
+                                end_index=seg.rows[split_idx - 1].index,
+                                segment_type="dialog",
+                                confidence=seg.confidence,
+                                reason=seg.reason,
+                                rows=seg1_rows,
+                            )
+                            seg2 = type(seg)(
+                                segment_id=f"{seg.segment_id}_part2",
+                                store_id=seg.store_id,
+                                start_index=seg.rows[split_idx].index,
+                                end_index=seg.rows[-1].index,
+                                segment_type="dialog",
+                                confidence=seg.confidence,
+                                reason=seg.reason,
+                                rows=seg2_rows,
+                            )
+                            
+                            new_segments.append(seg1)
+                            new_segments.append(seg2)
+                            split_long_segments += 1
+                            print(f"[FIX] {seg.segment_id}: разбит на 2 сегмента (duration={duration/60:.0f}мин, greeting='{greeting}')")
+                            continue
+            
+            new_segments.append(seg)
+        
+        segments = new_segments
+        
+        if split_long_segments > 0:
+            print(f"[FIX] Магазин {store_id}: разбито {split_long_segments} длинных сегментов")
+        
         # SEGMENT MERGING (heuristic by default, can be disabled with --no-segment-merge)
         if not getattr(args, 'no_segment_merge', False):
             if getattr(args, 'segment_merge_llm', False):
