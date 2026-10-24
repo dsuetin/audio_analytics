@@ -802,6 +802,26 @@ def run(args) -> int:
             system_prompt=_system_prompt,
         )
         
+        # FIX: короткие background сегменты с gap < 60 сек после dialog → dialog
+        # Пример: dialog (13:42-13:47) → gap 51 сек → background "заряжен ну это давно" (13:48-13:52) = ОДИН диалог
+        fixed_background = 0
+        for i, seg in enumerate(segments):
+            if seg.segment_type == "background" and i > 0:
+                prev_seg = segments[i - 1]
+                if prev_seg.segment_type == "dialog":
+                    # Проверить gap
+                    gap = (seg.start_at - prev_seg.end_at).total_seconds()
+                    if gap < 60:  # < 60 секунд
+                        # Проверить длину текста (короткий < 200 символов)
+                        if len(seg.text) < 200:
+                            # Объединить с предыдущим dialog
+                            print(f"[FIX] {seg.segment_id}: background → dialog (gap={gap:.0f}s)")
+                            seg.segment_type = "dialog"
+                            fixed_background += 1
+        
+        if fixed_background > 0:
+            print(f"[FIX] Магазин {store_id}: объединено {fixed_background} background сегментов")
+        
         # SEGMENT MERGING (heuristic by default, can be disabled with --no-segment-merge)
         if not getattr(args, 'no_segment_merge', False):
             if getattr(args, 'segment_merge_llm', False):
@@ -867,6 +887,8 @@ def run(args) -> int:
             f"{resplit_sink.get('resegmented')} разбито "
             f"(LLM-вызовов: {resplit_sink.get('llm_calls')})"
         )
+
+    # Контроль качества: длительности dialog-сегментов
     dur_metrics = duration_metrics(all_segments)
     if dur_metrics.get("count"):
         print(
