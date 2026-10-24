@@ -180,6 +180,10 @@ def run_offline_analysis(
         "--output",
         str(final_path),
         # debug path is chosen by run.py from the output stem: final_..._debug.json
+        # Segment merge with LLM (production default)
+        "--segment-merge-llm",
+        "--segment-merge-threshold",
+        "180.0",
     ]
 
     # Optional parallelism for the LLM step (existing env-knob style; unset => safe default in run.py).
