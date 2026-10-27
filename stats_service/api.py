@@ -2282,6 +2282,43 @@ AUDIO_PAGE_HTML = """<!doctype html>
       return;
     }
     
+    // ВАЖНО: Останавливаем аудио перед удалением диалога
+    console.log('[AUDIO] Остановка аудио при удалении диалога ' + dialogId);
+    if (window.AudioController) {
+      // Отменяем pending запрос
+      if (window.AudioController.abortController) {
+        window.AudioController.abortController.abort();
+        window.AudioController.abortController = null;
+      }
+      
+      // Останавливаем все аудио из кэша
+      for (var cachedDialogId in window.AudioController.audioCache || {}) {
+        var cachedAudio = window.AudioController.audioCache[cachedDialogId].audio;
+        if (cachedAudio) {
+          try {
+            cachedAudio.pause();
+            cachedAudio.currentTime = 0;
+          } catch(e) {}
+        }
+      }
+      
+      // Останавливаем текущее аудио
+      if (window.AudioController.audio) {
+        try {
+          window.AudioController.audio.pause();
+          window.AudioController.audio.src = '';
+        } catch(e) {}
+      }
+      
+      // Очищаем кэш и состояние
+      window.AudioController.audioCache = {};
+      window.AudioController.currentDialogId = null;
+      window.AudioController.currentState = 'idle';
+      window.AudioController.isLoading = false;
+      
+      console.log('[AUDIO] Все аудио остановлены');
+    }
+    
     fetch('/api/manual-dialogs/' + encodeURIComponent(dialogId), {
       method: 'DELETE'
     }).then(function(response) {
