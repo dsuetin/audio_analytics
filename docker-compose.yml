@@ -2,6 +2,23 @@ networks:
   speech:
     # external: true
 
+# LLM services configuration (llama.cpp servers with GPU)
+x-llama-server: &llama-server
+  build:
+    context: .
+    dockerfile: Dockerfile.llama-server
+  networks:
+    - speech
+  mem_limit: 32G
+  memswap_limit: 36G
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD", "curl", "-f", "http://127.0.0.1:8080/v1/models"]
+    interval: 30s
+    timeout: 10s
+    start_period: 120s
+    retries: 3
+
 x-daily-stats: &daily-stats
   build:
     context: .
@@ -29,11 +46,11 @@ x-daily-stats: &daily-stats
     POSTGRES_DB: speech_db
     REPORT_TIMEZONE: Europe/Moscow
     REPORT_OUTPUT_DIR: /reports
-    # Offline analysis (Qwen via Ollama). From inside the `speech` network the host
-    # loopback is not reachable, so default OLLAMA_HOST to the bridge gateway (where
-    # Ollama listens on the host). All values are overridable via the environment.
-    OLLAMA_HOST: ${OLLAMA_HOST:-http://172.18.0.1:11434}
-    OFFLINE_LLM_MODEL: ${OFFLINE_LLM_MODEL:-qwen3.8:27b}
+    # Offline analysis (Qwen via llama.cpp).
+    # LLAMACPP_HOST points to the llama-server service in the speech network.
+    # From the host, use http://172.16.20.111:8081/v1 or http://172.16.20.111:8082/v1
+    LLAMACPP_HOST: ${LLAMACPP_HOST:-http://llama-8082:8080/v1}
+    OFFLINE_LLM_MODEL: ${OFFLINE_LLM_MODEL:-Qwen3.5-27B-UD-Q4_K_XL.gguf}
     # Chain the offline step after the raw report (set to 0 to keep raw-only behavior).
     OFFLINE_ANALYSIS_ENABLED: ${OFFLINE_ANALYSIS_ENABLED:-1}
     # Sequential (no LLM parallelism) so a single nightly block never exceeds the timeout;
@@ -279,10 +296,10 @@ services:
       # ASR_USE_LM: "True"
       TRITON_PARAMETERS: >
         --model-config-name=gpu
-        --model-control-mode=explicit
-        --load-model marblenet
-        --load-model online_vad
-        --load-model offline_vad
+        # --model-control-mode=explicit
+        # --load-model marblenet
+        # --load-model online_vad
+        # --load-model offline_vad
       TRITON_SERVER_ARGS: >
         --model-repository=/mnt/models
         --backend-config=onnxruntime,intra_op_thread_count=1
@@ -403,8 +420,8 @@ services:
       POSTGRES_PASSWORD: speech
       POSTGRES_DB: speech_db
       REPORT_OUTPUT_DIR: /tests_reports
-      OLLAMA_HOST: ${OLLAMA_HOST:-http://172.18.0.1:11434}
-      OFFLINE_LLM_MODEL: ${OFFLINE_LLM_MODEL:-qwen3.8:27b}
+      LLAMACPP_HOST: ${LLAMACPP_HOST:-http://llama-8082:8080/v1}
+      OFFLINE_LLM_MODEL: ${OFFLINE_LLM_MODEL:-Qwen3.5-27B-UD-Q4_K_XL.gguf}
       OFFLINE_ANALYSIS_ENABLED: ${OFFLINE_ANALYSIS_ENABLED:-1}
       OFFLINE_WORKERS: ${OFFLINE_WORKERS:-1}
       OFFLINE_LLM_TIMEOUT: ${OFFLINE_LLM_TIMEOUT:-3600}
@@ -498,6 +515,54 @@ services:
       LOCK_FILE: /var/lib/audio_retention/retention.lock
 
     restart: unless-stopped
+
+  # # Llama.cpp server 1 (GPU 0: f7e2dab1-0073-d8e6-2e0c-1b78dbba2db9)
+  # llama-8081:
+  #   <<: *llama-server
+  #   container_name: llama-server-8081
+  #   ports:
+  #     - "8081:8080"
+  #   volumes:
+  #     - /home/developer/models:/models:ro
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             device_ids: ["nvidia.com/gpu=GPU-f7e2dab1-0073-d8e6-2e0c-1b78dbba2db9"]
+  #             capabilities: [gpu]
+  #   command: >
+  #     /usr/local/bin/llama-server
+  #     --model /models/Qwen3.5-27B-UD-Q4_K_XL.gguf
+  #     --host 0.0.0.0
+  #     --port 8080
+  #     -ngl 999
+  #     -c 131072
+  #     -np 1
+
+  # # Llama.cpp server 2 (GPU 1: f56e8753-2ccb-3e94-8251-e1a2072186a8)
+  # llama-8082:
+  #   <<: *llama-server
+  #   container_name: llama-server-8082
+  #   ports:
+  #     - "8082:8080"
+  #   volumes:
+  #     - /home/developer/models:/models:ro
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             device_ids: ["nvidia.com/gpu=GPU-f56e8753-2ccb-3e94-8251-e1a2072186a8"]
+  #             capabilities: [gpu]
+  #   command: >
+  #     /usr/local/bin/llama-server
+  #     --model /models/Qwen3.5-27B-UD-Q4_K_XL.gguf
+  #     --host 0.0.0.0
+  #     --port 8080
+  #     -ngl 999
+  #     -c 131072
+  #     -np 1
 
 volumes:
   postgres_data:

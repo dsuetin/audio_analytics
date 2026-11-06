@@ -1,0 +1,79 @@
+# Docker Compose configuration for llama.cpp LLM servers
+# Two independent servers, each bound to a specific GPU
+
+services:
+  llama-8081:
+    build:
+      context: .
+      dockerfile: Dockerfile.llama-server
+    container_name: llama-server-8081
+    ports:
+      - "8081:8080"
+    volumes:
+      # Mount the model read-only from host
+      - /home/developer/models:/models:ro
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "GPU-f7e2dab1-0073-d8e6-2e0c-1b78dbba2db9"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              # Use CDI device specification for GPU UUID targeting
+              device_ids: ["nvidia.com/gpu=GPU-f7e2dab1-0073-d8e6-2e0c-1b78dbba2db9"]
+              capabilities: [gpu]
+    mem_limit: 32G
+    memswap_limit: 36G
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8080/v1/models"]
+      interval: 30s
+      timeout: 10s
+      start_period: 120s
+      retries: 3
+    command: >
+      /usr/local/bin/llama-server
+      --model /models/Qwen3.5-27B-UD-Q4_K_XL.gguf
+      --host 0.0.0.0
+      --port 8080
+      -ngl 999
+      -c 131072
+      -np 1
+
+  llama-8082:
+    build:
+      context: .
+      dockerfile: Dockerfile.llama-server
+    container_name: llama-server-8082
+    ports:
+      - "8082:8080"
+    volumes:
+      # Mount the model read-only from host
+      - /home/developer/models:/models:ro
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "GPU-f56e8753-2ccb-3e94-8251-e1a2072186a8"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              # Use CDI device specification for GPU UUID targeting
+              device_ids: ["nvidia.com/gpu=GPU-f56e8753-2ccb-3e94-8251-e1a2072186a8"]
+              capabilities: [gpu]
+    mem_limit: 32G
+    memswap_limit: 36G
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8080/v1/models"]
+      interval: 30s
+      timeout: 10s
+      start_period: 120s
+      retries: 3
+    command: >
+      /usr/local/bin/llama-server
+      --model /models/Qwen3.5-27B-UD-Q4_K_XL.gguf
+      --host 0.0.0.0
+      --port 8080
+      -ngl 999
+      -c 131072
+      -np 1

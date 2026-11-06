@@ -1,0 +1,83 @@
+# Dockerfile for llama.cpp server with CUDA support
+# Multi-stage build: compiles llama.cpp in builder, runtime in final image
+
+# =============================================================================
+# Stage 1: Builder - compile llama.cpp from source
+# =============================================================================
+FROM nvidia/cuda:13.2.0-devel-ubuntu24.04 AS builder
+
+# Install build dependencies with aggressive cleanup
+RUN apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* && \
+    apt-get update -o Acquire::Check-Valid-Until=false -o Acquire::AllowInsecureRepositories=true -o APT::Cache::Limit=0 || true && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        -o Dpkg::Options::="--force-confdef" \
+        -o Dpkg::Options::="--force-confold" \
+        build-essential \
+        cmake \
+        git \
+        ca-certificates \
+        curl \
+        libgomp1 \
+        cuda-cudart-13-2 \
+        cuda-driver-dev-13-2 && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* /tmp/*
+
+# Clone and build llama.cpp
+WORKDIR /build
+RUN git clone --depth 1 https://github.com/ggml-org/llama.cpp.git . && \
+    mkdir build && cd build && \
+    cmake .. \
+        -DGGML_CUDA=ON \
+        -DLLAMA_BUILD_SERVER=ON \
+        -DCMAKE_CUDA_ARCHITECTURES=120 \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_EXE_LINKER_FLAGS="-Wl,-rpath,/usr/local/cuda-13.2/compat" && \
+    make -j$(nproc) llama-server && \
+    cp bin/llama-server /usr/local/bin/ && \
+    cp bin/*.so* /usr/local/lib/ && \
+    rm -rf /build/*
+
+# =============================================================================
+# Stage 2: Runtime - minimal image with pre-built binaries
+# =============================================================================
+FROM nvidia/cuda:13.2.0-base-ubuntu24.04
+
+# Install runtime dependencies (cuda-libraries-13-2 provides libcublas, libcusolver, etc.)
+RUN apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* && \
+    apt-get update -o Acquire::Check-Valid-Until=false -o Acquire::AllowInsecureRepositories=true -o APT::Cache::Limit=0 || true && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        -o Dpkg::Options::="--force-confdef" \
+        -o Dpkg::Options::="--force-confold" \
+        ca-certificates \
+        curl \
+        libgomp1 \
+        cuda-cudart-13-2 \
+        cuda-libraries-13-2 && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* /tmp/*
+
+# Copy llama-server and shared libraries from builder
+COPY --from=builder /usr/local/bin/llama-server /usr/local/bin/llama-server
+COPY --from=builder /usr/local/lib/*.so* /usr/local/lib/
+
+# Create non-root user
+RUN useradd --create-home --shell /bin/bash llama && \
+    chown -R llama:llama /usr/local/bin/llama-server /usr/local/lib
+
+USER llama
+
+# Set library path
+ENV LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+
+# Expose port
+EXPOSE 8080
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+    CMD curl -f http://127.0.0.1:8080/v1/models || exit 1
+
+# Default command
+CMD ["/usr/local/bin/llama-server"]
