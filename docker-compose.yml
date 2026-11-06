@@ -296,10 +296,15 @@ services:
       # ASR_USE_LM: "True"
       TRITON_PARAMETERS: >
         --model-config-name=gpu
-        # --model-control-mode=explicit
-        # --load-model marblenet
-        # --load-model online_vad
-        # --load-model offline_vad
+        --model-control-mode=explicit
+        --load-model marblenet
+        --load-model online_vad
+        --load-model offline_vad
+        --load-model diarization
+        --load-model vad
+        --load-model embedder
+        --load-model clusterer
+        --load-model boundary_detector
       TRITON_SERVER_ARGS: >
         --model-repository=/mnt/models
         --backend-config=onnxruntime,intra_op_thread_count=1
