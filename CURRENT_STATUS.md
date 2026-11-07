@@ -2,7 +2,231 @@
 
 > Единый источник «какое состояние проекта сейчас» для OpenCode/агентов.
 > Обновлять в каждом рабочем сеансе. Детали задач — в `TODO.md`. Агентовый entry point — `AGENTS.md`.
-> Последнее обновление: 2026-11-06 (ASR word absolute timestamps + streaming diarization gap handling).
+> Последнее обновление: 2026-11-07 (Diarization Replay Test Stand + stream recovery + 22:00 finalization).
+
+## Итог сессии 2026-11-07 (Diarization Replay Test Stand + Диагностика)
+
+### Задача: Создать изолированный Replay Test Stand для Streaming Diarization
+
+**Цель:** Создать отдельный тестовый инструмент для воспроизведения реальных аудиоданных из S3 через модель Triton Diarization.
+
+**Статус:** ⚠️ **КРИТИЧЕСКИЕ ПРОБЛЕМЫ ОБНАРУЖЕНЫ**
+
+**Реализация:**
+
+1. **Модуль:** `diarization_worker/tools/diarization_replay.py`
+
+2. **Функциональность:**
+   - ✅ Поиск аудиочанков в S3 (full pagination, 71 страница, 70,353 объекта)
+   - ✅ Генерация manifest.json с hourly statistics
+   - ⚠️ Воспроизведение через Triton (критическая проблема с моделью)
+   - ⚠️ Финализация (IndexError при пустом audio tensor)
+   - ✅ Словарь спикеров за весь день
+   - ✅ Генерация REPORT.md
+
+3. **CLI интерфейс:**
+   ```bash
+   python -m diarization_worker.tools.diarization_replay --date 2026-11-07 --store-id "г_Ессентуки_ул_Первомайская_85"
+   ```
+
+4. **Результаты full-day replay (2026-11-07, г_Ессентуки_ул_Первомайская_85):**
+   - Чанков: 3,220 (940 VAD сессий, 9 часов, 07:11-15:52)
+   - Обработка: 351.36 сек (14.1x медленнее реального времени)
+   - Спикеров: 4 (speaker_1, speaker_2, speaker_3, speaker_4)
+   - Сегментов: 4,693 (но только 49 уникальных, 98.9% дубликаты)
+   - **КРИТИЧЕСКАЯ ПРОБЛЕМА:** Сегменты только из первых 3.91 сек аудио (потеря 99.92% данных)
+
+### КРИТИЧЕСКИЕ ПРОБЛЕМЫ
+
+1. **Модель Triton не сохраняет сегменты для long-running sequences**
+   - Аудио: 83 минуты (4,964 сек)
+   - Сегменты: только первые 3.91 секунды
+   - **Потеря данных: 99.92%**
+   - Требуется исследование `model_impl.py` в контейнере Triton
+
+2. **Дублирование сегментов**
+   - 4,693 сегмента, только 49 уникальных
+   - Причина: код добавляет все сегменты из каждого ответа Triton
+
+3. **IndexError при финализации**
+   - Пустой audio tensor вызывает исключение
+   - Статус всё равно `SUCCESS` (баг логики)
+
+4. **Производительность**
+   - 14.1x медленнее реального времени
+   - Причина: sequential processing с ожиданием Triton
+
+**Вывод:** Replay НЕПРИГОДЕН для production до исправления проблемы с моделью Triton.
+
+**Отчёты:**
+- `reports/DIARIZATION_REPLAY_DIAGNOSTIC_REPORT_2026-11-07.md` — полный диагностический отчёт
+- `reports/DIARIZATION_REPLAY_DIAGNOSTIC_SUMMARY.md` — краткое резюме
+
+---
+
+## Итог сессии 2026-11-07 (streaming diarization: stream recovery + 22:00 finalization)
+
+### Критическая проблема: `The stream is no longer in valid state`
+
+**Статус:** ✅ ИСПРАВЛЕНО
+
+**Проблема:** После перезагрузки Triton (05:50:08 UTC) все streaming sessions стали недействительными. Worker продолжал использовать старые connections, что приводило к ошибкам:
+
+```
+tritonclient.utils.InferenceServerException: The stream is no longer in valid state, 
+the error detail is reported through provided callback. A new stream should be started after stopping the current stream.
+```
+
+**Решение:** Добавлен автоматический механизм восстановления stream:
+
+1. **Метод `_recover_stream_session()`** (строка 443-499):
+   - Сохраняет текущие сегменты в БД перед восстановлением
+   - Закрывает старый Triton client
+   - Создаёт новый client с новым `sequence_id`
+   - Возвращает сессию в активное состояние
+
+2. **Обработка ошибки в `_send_buffered_audio_to_streaming()`** (строка 542-597):
+   - Detect ошибка "stream is no longer in valid state"
+   - Вызывает `_recover_stream_session()`
+   - Повторно отправляет buffered audio с новой сессией
+
+**Логирование:**
+- `STREAM_RECOVERY_STARTED`
+- `STREAM_RECOVERY: Saved N segments before recovery`
+- `STREAM_RECOVERY_COMPLETED`
+- `STREAM_RECOVERY_FAILED`
+- `STREAM_INVALID: Attempting recovery...`
+- `STREAM_RECOVERY_RETRY: Re-sending N chunks after recovery`
+
+---
+
+### Задача 2: Планировщик финализации в 22:00
+
+**Цель:** Ежедневно в 22:00 Moscow time автоматически финализировать все активные дневные сессии.
+
+**Реализация:**
+
+1. ✅ **Метод `_schedule_daily_finalization()`** (строка 1021-1057):
+   - Background task, работающий независимо от Kafka consumer
+   - Расчёт времени до 22:00 Moscow time
+   - `await asyncio.sleep(wait_seconds)` до целевого времени
+   - Вызов `_trigger_daily_finalization()` в 22:00
+
+2. ✅ **Метод `_trigger_daily_finalization()`** (строка 1059-1108):
+   - Получение всех активных сессий (`session.active and session.total_chunks > 0`)
+   - Финализация каждой сессии независимо с блокировкой `session_locks`
+   - Логирование успеха/ошибки для каждого магазина
+
+3. ✅ **Запуск в `run()`** (строка 1203-1206):
+   - Создание task после старта Kafka consumer
+   - Корректная остановка при завершении worker
+
+**Логирование:**
+- `DAILY_FINALIZATION_SCHEDULER_STARTED`
+- `DAILY_FINALIZATION_SCHEDULED: Next finalization at YYYY-MM-DD 22:00:00 (in N seconds)`
+- `DAILY_FINALIZATION_STARTED`
+- `DAILY_FINALIZATION_STORE_COUNT: Found N active sessions`
+- `DAILY_FINALIZATION_STORE_STARTED`
+- `DAILY_FINALIZATION_STORE_COMPLETED`
+- `DAILY_FINALIZATION_STORE_FAILED`
+- `DAILY_FINALIZATION_COMPLETED: Success=N Failed=M Total=K`
+
+---
+
+### Задача 3: Промежуточное сохранение результатов
+
+**Статус:** ✅ УЖЕ РАБОТАЕТ (изменения не требовались)
+
+**Текущее поведение:**
+- Результаты сохраняются в БД **немедленно** после каждого ответа от Triton
+- Метод `_check_for_responses()` вызывает `save_diarization_result()` для каждого ответа
+- Обновление происходит через `ON CONFLICT (session_id) DO UPDATE`
+
+**Вывод:** Промежуточное сохранение уже реализовано корректно.
+
+---
+
+### Задача 4: Daily session lifecycle (из предыдущей сессии)
+
+**Статус:** ✅ РЕАЛИЗОВАНО (см. `reports/STREAMING_DIARIZATION_DAILY_SESSION_LIFECYCLE.md`)
+
+**Реализовано:**
+- Поле `current_date` в `StoreSession`
+- Функция `get_date_from_vad_session_id()`
+- Методы `_send_finalization_request()`, `_finalize_daily_session()`, `_handle_daily_session_rollover()`
+- Логирование событий жизненного цикла
+
+---
+
+### Задача 5: Исследование max_speakers
+
+**Статус:** ✅ ГИПОТЕЗА ОПРОВЕРГНУТА (см. `reports/DIARIZATION_MAX_SPEAKERS_INVESTIGATION_2026-11-07.md`)
+
+**Вывод:** Превышение лимита спикеров НЕ является причиной перезагрузки Triton.
+
+---
+
+### Файлы изменены
+
+| Файл | Изменения |
+|------|-----------|
+| `diarization_worker/streaming_diarization_worker.py` | Stream recovery, 22:00 finalization scheduler, daily session lifecycle |
+| `diarization_worker/streaming_diarization_worker.py.backup` | Резервная копия |
+| `diarization_worker/tools/diarization_replay.py` | Speakers dictionary feature, full-day replay support |
+| `reports/SPEAKERS_DICTIONARY_FEATURE.md` | Documentation for speakers dictionary feature |
+| `reports/DIARIZATION_REPLAY_DIAGNOSTIC_REPORT_2026-11-07.md` | Полный диагностический отчёт |
+| `reports/DIARIZATION_REPLAY_DIAGNOSTIC_SUMMARY.md` | Краткое резюме диагностики |
+
+### Синтаксис проверен
+
+```bash
+python3 -m py_compile diarization_worker/streaming_diarization_worker.py
+# Syntax OK
+```
+
+### Следующие шаги (streaming_diarization_worker)
+
+1. **Перезапустить worker:**
+   ```bash
+   docker restart streaming-diarization-worker
+   ```
+
+2. **Проверить восстановление stream:**
+   ```bash
+   docker logs -f streaming-diarization-worker | grep -E "STREAM_RECOVERY|STREAM_INVALID"
+   ```
+
+3. **Проверить планировщик:**
+   ```bash
+   docker logs streaming-diarization-worker | grep "DAILY_FINALIZATION_SCHEDULED"
+   ```
+
+4. **Ожидать 22:00 MSK для проверки финализации**
+
+### Следующие шаги (diarization_replay — КРИТИЧНО)
+
+1. **Исследовать модель Triton** — почему не сохраняет сегменты для long sequences
+   - Проверить `model_impl.py` в контейнере `server_triton-speech-segmentation`
+   - Проверить поддерживает ли модель sequences > 1 часа
+   - Проверить есть ли лимит на накопление сегментов
+
+2. **Исправить баги в replay коде:**
+   - Дедупликация сегментов
+   - Статус SUCCESS (учитывать ошибки)
+   - Финализация (минимальный audio tensor)
+
+3. **Тестировать на малом наборе данных** (1 VAD session) перед full-day replay
+
+**Важно:** Не использовать результаты текущего replay в production до исправления проблемы с моделью.
+
+---
+
+**Отчёты:**
+- `reports/STREAMING_DIARIZATION_INTERMEDIATE_SAVE_AND_2200_FINALIZATION.md` — эта реализация
+- `reports/STREAMING_DIARIZATION_DAILY_SESSION_LIFECYCLE.md` — daily session lifecycle
+- `reports/DIARIZATION_MAX_SPEAKERS_INVESTIGATION_2026-11-07.md` — max speakers investigation
+
+---
 
 ## Итог сессии 2026-11-06 (streaming diarization: absolute timestamp calculation с учётом gaps между VAD сессиями)
 

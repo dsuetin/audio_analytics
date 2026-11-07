@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set
 from queue import Queue
 from zoneinfo import ZoneInfo
+from asyncio import Task
 
 import asyncpg
 import boto3
@@ -93,6 +94,24 @@ def parse_session_id(session_id: str) -> Dict[str, str]:
     raise ValueError(f"Invalid session_id format: {session_id}")
 
 
+def get_date_from_vad_session_id(vad_session_id: str) -> str:
+    """
+    Extract date (YYYY-MM-DD) from VAD session_id.
+    
+    Format: YYYYmmdd-HHMMSS-STORE_ID-SELLER_ID-UUID
+    
+    Returns:
+        Date string in format YYYY-MM-DD
+    """
+    try:
+        meta = parse_session_id(vad_session_id)
+        date_str = meta['date']  # YYYYmmdd
+        return f"{date_str[0:4]}-{date_str[4:6]}-{date_str[6:8]}"  # YYYY-MM-DD
+    except (ValueError, KeyError):
+        logger.warning("Failed to parse date from session_id %s, using current date", vad_session_id)
+        return datetime.now(MOSCOW_TZ).strftime("%Y-%m-%d")
+
+
 @dataclass
 class ChunkInfo:
     """Информация о чанке аудио."""
@@ -117,9 +136,10 @@ class StoreSession:
     """Состояние streaming сессии для магазина."""
     store_id: str
     sequence_id: str
+    current_date: str = None  # Дата сессии (YYYY-MM-DD)
     triton_client: Optional[InferenceServerClient] = None
     user_data: Optional[object] = None
-    active: bool = False
+    active: bool = True
     speaker_ids: Set[int] = field(default_factory=set)
     seller_ids: Set[str] = field(default_factory=set)  # Уникальные seller_ids для этого магазина
     total_chunks: int = 0
@@ -137,6 +157,9 @@ class StoreSession:
     audio_buffer: List[tuple] = field(default_factory=list)  # List of (vad_session_id, chunk_id, audio_array, is_end)
     buffered_duration_ms: int = 0  # Общая длительность накопленного аудио в буфере
     last_buffer_send_time: float = 0  # Время последней отправки буфера
+    
+    # Global chunk_id counter for diarization_online model (stateful streaming)
+    global_chunk_id: int = 0  # Sequential chunk_id for Triton diarization_online model
 
 
 def calculate_chunk_duration_ms(size_bytes: int) -> int:
@@ -208,7 +231,7 @@ class StreamingDiarizationWorker:
 
         # Triton configuration
         self.triton_url = os.getenv("TRITON_URL", "server_triton-speech-segmentation:8001")
-        self.model_name = os.getenv("TRITON_MODEL", "diarization")
+        self.model_name = "diarization_online"  # Use streaming model for proper stateful diarization
 
         # Database configuration
         self.db_dsn = os.getenv("DATABASE_URL", "postgresql://speech:speech@postgres:5432/streaming_diarization")
@@ -237,6 +260,10 @@ class StreamingDiarizationWorker:
             'total_speakers_detected': 0,
             'stores_active': 0
         }
+        
+        # Finalization scheduler
+        self.finalization_task: Optional[Task] = None
+        self.finalization_enabled = True
 
     async def get_s3_object(self, key: str) -> bytes:
         """Асинхронное чтение объекта из S3."""
@@ -259,8 +286,12 @@ class StreamingDiarizationWorker:
             pass
         return "unknown"
 
-    def _create_vad_marks(self) -> bytes:
-        """Создаёт vad_marks protobuf message для streaming."""
+    def _create_vad_marks(self, audio_duration_ms: int = 1000) -> bytes:
+        """Создаёт vad_marks protobuf message для streaming.
+        
+        Args:
+            audio_duration_ms: Duration of the audio in milliseconds
+        """
         from diarization_protocol import output_pb2
         
         vad_marks = output_pb2.SpeakerSegment()
@@ -270,10 +301,10 @@ class StreamingDiarizationWorker:
         begin_mark.mark_type = output_pb2.VoiceActivityMark.VA_MARK_BEGIN
         begin_mark.offset_ms = 0
         
-        # END mark at end (placeholder, will be updated)
+        # END mark at actual audio duration
         end_mark = output_pb2.VoiceActivityMark()
         end_mark.mark_type = output_pb2.VoiceActivityMark.VA_MARK_END
-        end_mark.offset_ms = 1000  # Default 1 second, will be adjusted
+        end_mark.offset_ms = audio_duration_ms
         
         vad_marks.va_marks.extend([begin_mark, end_mark])
         
@@ -399,25 +430,91 @@ class StreamingDiarizationWorker:
             session.sequence_id = sequence_id
             session.user_data = user_data
             session.active = True
+            session.global_chunk_id = 0  # Reset global chunk_id for new sequence (diarization_online)
+            # Preserve current_date if it exists
+            if not session.current_date:
+                session.current_date = datetime.now(MOSCOW_TZ).strftime("%Y-%m-%d")
         else:
             session = StoreSession(
                 store_id=store_id,
                 sequence_id=sequence_id,
+                current_date=datetime.now(MOSCOW_TZ).strftime("%Y-%m-%d"),
                 triton_client=client,
                 user_data=user_data,
                 active=True,
                 speaker_ids=set(),
                 total_chunks=0,
-                last_activity=time.time()
+                last_activity=time.time(),
+                global_chunk_id=0  # Initialize global chunk_id for diarization_online
             )
             self.store_sessions[store_id] = session
         
-        logger.info("Created/Updated streaming session for store %s (sequence_id=%s)", store_id, sequence_id)
+        logger.info("Created/Updated streaming session for store %s (sequence_id=%s, date=%s)", 
+                   store_id, sequence_id, session.current_date)
         
         return session
 
+    async def _recover_stream_session(self, session: StoreSession):
+        """
+        Recover a streaming session after 'stream is no longer in valid state' error.
+        
+        Args:
+            session: StoreSession to recover
+        """
+        logger.info(
+            "STREAM_RECOVERY_STARTED: Store %s date=%s sequence_id=%s",
+            session.store_id, session.current_date, session.sequence_id
+        )
+        
+        try:
+            # Save current segments before recovery
+            if session.absolute_speaker_segments:
+                sellers_list = list(session.seller_ids) if session.seller_ids else None
+                await self.save_diarization_result(session.store_id, session.absolute_speaker_segments, sellers_list)
+                logger.info(
+                    "STREAM_RECOVERY: Saved %d segments before recovery for store %s",
+                    len(session.absolute_speaker_segments), session.store_id
+                )
+            
+            # Close old client
+            if session.triton_client:
+                try:
+                    session.triton_client.stop_stream()
+                    session.triton_client.close()
+                except Exception as e:
+                    logger.warning("Failed to close old client: %s", e)
+            
+            # Create new sequence_id and client
+            new_sequence_id = str(uuid.uuid4())
+            user_data = self.StreamingUserData(self, session.store_id)
+            new_client = InferenceServerClient(url=self.triton_url)
+            new_client.start_stream(callback=user_data.callback)
+            
+            # Update session
+            session.triton_client = new_client
+            session.sequence_id = new_sequence_id
+            session.user_data = user_data
+            session.active = True
+            session.total_chunks = 0  # Reset chunk counter for new sequence
+            session.global_chunk_id = 0  # Reset global chunk_id for new sequence (diarization_online)
+            
+            logger.info(
+                "STREAM_RECOVERY_COMPLETED: Store %s date=%s new_sequence_id=%s",
+                session.store_id, session.current_date, new_sequence_id
+            )
+            
+            return True
+            
+        except Exception as e:
+            logger.exception(
+                "STREAM_RECOVERY_FAILED: Store %s date=%s error=%s",
+                session.store_id, session.current_date, e
+            )
+            session.active = False
+            return False
+
     async def _send_buffered_audio_to_streaming(self, session: StoreSession):
-        """Отправляет накопленное аудио из буфера в streaming сессию."""
+        """Отправляет накопленное аудио из буфера в streaming сессию (diarization_online)."""
         if not session.audio_buffer:
             return
         
@@ -427,23 +524,30 @@ class StreamingDiarizationWorker:
         is_end = session.audio_buffer[-1][3]  # is_end from last chunk
         
         logger.info(
-            "Store %s: Sending buffered audio to diarization (%d chunks, %d ms total)",
-            session.store_id, total_chunks_in_buffer, session.buffered_duration_ms
+            "Store %s: Sending buffered audio to diarization_online (%d chunks, %d ms total, global_chunk_id=%d)",
+            session.store_id, total_chunks_in_buffer, session.buffered_duration_ms, session.global_chunk_id
         )
         
-        vad_marks = self._create_vad_marks()
+        # Create vad_marks with actual audio duration
+        audio_duration_ms = int(len(concatenated_audio) * 1000 / SAMPLE_RATE)
+        vad_marks = self._create_vad_marks(audio_duration_ms)
         vad_marks_np = np.array([[vad_marks]], dtype=object)
         
         # Prepare input
         input_np = np.zeros((1, len(concatenated_audio)), dtype=np.int16)
         input_np[0][:len(concatenated_audio)] = concatenated_audio[:len(concatenated_audio)]
         
+        # chunk_id for diarization_online model (global sequential counter)
+        chunk_id_np = np.array([[session.global_chunk_id]], dtype=np.uint16)
+        
         inputs = [
             InferInput("input", input_np.shape, np_to_triton_dtype(input_np.dtype)),
             InferInput("vad_marks", vad_marks_np.shape, "BYTES"),
+            InferInput("chunk_id", chunk_id_np.shape, np_to_triton_dtype(chunk_id_np.dtype)),
         ]
         inputs[0].set_data_from_numpy(input_np)
         inputs[1].set_data_from_numpy(vad_marks_np)
+        inputs[2].set_data_from_numpy(chunk_id_np)
         
         outputs = [InferRequestedOutput("DiarisationResponse")]
         
@@ -454,24 +558,68 @@ class StreamingDiarizationWorker:
             "frame_shift": "10",
             "max_speaker": "20",
             "num_speaker": "0",
-            "use_audiogram_vad": "False"
+            "use_audiogram_vad": "True"  # Enable audiogram VAD for diarization_online
         }
         
-        # Send async stream infer
-        session.triton_client.async_stream_infer(
-            self.model_name,
-            inputs,
-            request_id=f"{session.store_id}-buffered-{session.total_chunks}",
-            outputs=outputs,
-            parameters=parameters,
-            sequence_id=session.sequence_id,
-            sequence_start=(session.total_chunks == 0),
-            sequence_end=is_end,
-            enable_empty_final_response=True
-        )
-        
-        session.total_chunks += total_chunks_in_buffer
-        session.last_activity = time.time()
+        try:
+            # Send async stream infer
+            session.triton_client.async_stream_infer(
+                self.model_name,
+                inputs,
+                request_id=f"{session.store_id}-buffered-{session.global_chunk_id}",
+                outputs=outputs,
+                parameters=parameters,
+                sequence_id=session.sequence_id,
+                sequence_start=(session.global_chunk_id == 0),
+                sequence_end=is_end,
+                enable_empty_final_response=True
+            )
+            
+            session.total_chunks += total_chunks_in_buffer
+            session.global_chunk_id += 1  # Increment global chunk_id for next batch
+            session.last_activity = time.time()
+            
+        except Exception as e:
+            # Check if this is a stream invalid state error
+            error_msg = str(e)
+            if "stream is no longer in valid state" in error_msg:
+                logger.warning(
+                    "STREAM_INVALID: Store %s date=%s error=%s. Attempting recovery...",
+                    session.store_id, session.current_date, error_msg
+                )
+                
+                # Try to recover the stream
+                recovery_success = await self._recover_stream_session(session)
+                
+                if recovery_success:
+                    # Retry sending the buffered audio with new session
+                    logger.info(
+                        "STREAM_RECOVERY_RETRY: Store %s re-sending %d chunks after recovery",
+                        session.store_id, total_chunks_in_buffer
+                    )
+                    # Recursive call with exponential backoff could be added here
+                    # For now, just retry once
+                    session.triton_client.async_stream_infer(
+                        self.model_name,
+                        inputs,
+                        request_id=f"{session.store_id}-buffered-retry-{session.total_chunks}",
+                        outputs=outputs,
+                        parameters=parameters,
+                        sequence_id=session.sequence_id,
+                        sequence_start=True,  # New sequence starts here
+                        sequence_end=is_end,
+                        enable_empty_final_response=True
+                    )
+                    session.total_chunks += total_chunks_in_buffer
+                    session.last_activity = time.time()
+                else:
+                    logger.error(
+                        "STREAM_RECOVERY_FAILED: Store %s date=%s. Session marked inactive.",
+                        session.store_id, session.current_date
+                    )
+            else:
+                # Re-raise other errors
+                raise
 
     async def _send_chunk_to_streaming(self, session: StoreSession, audio_data: np.ndarray, chunk_id: int, is_end: bool):
         """Отправляет чанк в streaming сессию (legacy, kept for compatibility)."""
@@ -521,7 +669,11 @@ class StreamingDiarizationWorker:
                      chunk_id, session.store_id, session.total_chunks, is_end)
 
     async def _check_for_responses(self, session: StoreSession, timeout: float = 1.0):
-        """Проверяет наличие ответов от Triton."""
+        """Проверяет наличие ответов от Triton (diarization_online).
+        
+        diarization_online returns results ONLY at sequence_end=True.
+        All segments for the entire sequence are returned at once.
+        """
         if not session.user_data or not session.active:
             return
         
@@ -540,12 +692,16 @@ class StreamingDiarizationWorker:
                     try:
                         output_np = msg.as_numpy("DiarisationResponse")
                         if output_np is not None and output_np.size > 0:
-                            # Parse response
+                            # Parse response (diarization_online returns FINAL results only)
                             diarization_bytes = output_np.tolist()
                             from diarization_protocol import output_pb2
                             diarization_result = output_pb2.DiarisationResponse.FromString(diarization_bytes)
                             
-                            # Обновляем tracking спикеров и сохраняем сегменты с абсолютным временем
+                            # Clear previous segments (diarization_online returns complete results)
+                            session.absolute_speaker_segments.clear()
+                            session.speaker_ids.clear()
+                            
+                            # Process final segments
                             new_speakers = []
                             for speaker_segment in diarization_result.speaker_segment:
                                 if len(speaker_segment.va_marks) >= 2:
@@ -553,11 +709,11 @@ class StreamingDiarizationWorker:
                                     relative_start_ms = speaker_segment.va_marks[0].offset_ms
                                     relative_end_ms = speaker_segment.va_marks[1].offset_ms
                                     
-                                    # Конвертируем в абсолютное время
+                                    # Convert to absolute time
                                     absolute_start_ms = relative_to_absolute_time(session, relative_start_ms)
                                     absolute_end_ms = relative_to_absolute_time(session, relative_end_ms)
                                     
-                                    # Сохраняем сегмент с абсолютным временем
+                                    # Save segment with absolute time
                                     segment_data = {
                                         'speaker_id': speaker_id,
                                         'absolute_start_ms': absolute_start_ms,
@@ -567,37 +723,177 @@ class StreamingDiarizationWorker:
                                     }
                                     session.absolute_speaker_segments.append(segment_data)
                                     logger.debug(
-                                        "Store %s: Segment speaker=%d rel=%d-%d abs=%d-%d",
+                                        "Store %s: FINAL Segment speaker=%d rel=%d-%d abs=%d-%d",
                                         session.store_id, speaker_id,
                                         relative_start_ms, relative_end_ms,
                                         absolute_start_ms, absolute_end_ms
                                     )
                                     
-                                if speaker_id not in session.speaker_ids:
-                                    session.speaker_ids.add(speaker_id)
-                                    new_speakers.append(speaker_id)
+                                    if speaker_id not in session.speaker_ids:
+                                        session.speaker_ids.add(speaker_id)
+                                        new_speakers.append(speaker_id)
                             
-                            if new_speakers:
-                                logger.info(
-                                    "Store %s: New speakers detected %s (total: %d)",
-                                    session.store_id, new_speakers, len(session.speaker_ids)
-                                )
+                            logger.info(
+                                "Store %s: Received FINAL diarization results: %d segments, speakers=%s",
+                                session.store_id, len(session.absolute_speaker_segments), sorted(session.speaker_ids)
+                            )
                             
                             self.stats['total_speakers_detected'] += len(new_speakers)
                             
-                            # Save all segments to database immediately
+                            # Save all final segments to database
                             if session.absolute_speaker_segments:
-                                logger.info("About to save %d segments for store %s", len(session.absolute_speaker_segments), session.store_id)
-                                logger.info("First segment: %s", session.absolute_speaker_segments[0] if session.absolute_speaker_segments else "None")
                                 sellers_list = list(session.seller_ids) if session.seller_ids else None
                                 await self.save_diarization_result(session.store_id, session.absolute_speaker_segments, sellers_list)
                     
                     except Exception as e:
                         logger.debug("Failed to parse response: %s", e)
                         continue
-                         
+                        
         except Exception:
             pass  # No more responses available
+
+    async def _send_finalization_request(self, session: StoreSession):
+        """
+        No-op for diarization_online.
+        
+        diarization_online returns results when sequence_end=True is sent with the last chunk.
+        No separate finalization request is needed.
+        
+        Args:
+            session: StoreSession (not used)
+        """
+        logger.debug("Store %s: No finalization request needed for diarization_online", session.store_id)
+        pass
+        
+        # Wait for final response (with timeout)
+        await self._check_for_responses(session, timeout=5.0)
+
+    async def _finalize_daily_session(self, session: StoreSession):
+        """
+        Finalize a daily session and save results.
+        
+        Args:
+            session: StoreSession to finalize
+        """
+        logger.info(
+            "DAILY_SESSION_FINALIZING: Store %s date=%s chunks=%d segments=%d",
+            session.store_id, session.current_date,
+            session.total_chunks, len(session.absolute_speaker_segments)
+        )
+        
+        try:
+            # Save all segments to database FIRST (before closing Triton session)
+            if session.absolute_speaker_segments:
+                session_id = f"{session.current_date}_{session.store_id}"
+                sellers_list = list(session.seller_ids) if session.seller_ids else None
+                
+                await self.save_diarization_result(
+                    session.store_id,
+                    session.absolute_speaker_segments,
+                    sellers_list
+                )
+            
+            # Send finalization request to Triton
+            if session.triton_client and session.active:
+                await self._send_finalization_request(session)
+            
+            # Close Triton session
+            if session.triton_client:
+                session.triton_client.stop_stream()
+                session.triton_client.close()
+            
+            session.active = False
+            
+            logger.info(
+                "DAILY_SESSION_FINALIZED: Store %s date=%s segments=%d speakers=%d",
+                session.store_id, session.current_date,
+                len(session.absolute_speaker_segments), len(session.speaker_ids)
+            )
+            
+        except Exception as e:
+            logger.exception(
+                "DAILY_SESSION_FINALIZATION_FAILED: Store %s date=%s error=%s",
+                session.store_id, session.current_date, e
+            )
+            session.active = False
+            raise
+
+    async def _handle_daily_session_rollover(self, store_id: str, new_date: str) -> StoreSession:
+        """
+        Handle daily session rollover for a store.
+        
+        Args:
+            store_id: Store identifier
+            new_date: New date (YYYY-MM-DD)
+        
+        Returns:
+            StoreSession for the date (existing or new)
+        """
+        current_session = self.store_sessions.get(store_id)
+        
+        if current_session and current_session.current_date != new_date:
+            # Check if this is a new day (not a late chunk from previous day)
+            if new_date > current_session.current_date:
+                # Finalize old session
+                logger.info(
+                    "DAILY_SESSION_ROLLOVER: Store %s transitioning from %s to %s",
+                    store_id, current_session.current_date, new_date
+                )
+                
+                # Finalize old session if it has data
+                if current_session.total_chunks > 0:
+                    try:
+                        await self._finalize_daily_session(current_session)
+                    except Exception as e:
+                        logger.error("Failed to finalize old session: %s", e)
+                
+                # Create new session for new date
+                new_session = StoreSession(
+                    store_id=store_id,
+                    sequence_id=str(uuid.uuid4()),
+                    current_date=new_date,
+                    active=True,
+                )
+                self.store_sessions[store_id] = new_session
+                
+                # Ensure Triton session
+                await self._ensure_store_session(store_id)
+                
+                logger.info(
+                    "DAILY_SESSION_CREATED: Store %s date=%s sequence_id=%s",
+                    store_id, new_date, new_session.sequence_id
+                )
+                
+                return new_session
+            elif new_date < current_session.current_date:
+                # Late chunk from previous day - ignore with warning
+                logger.warning(
+                    "LATE_CHUNK_RECEIVED: Store %s chunk_date=%s current_date=%s ignoring",
+                    store_id, new_date, current_session.current_date
+                )
+                return None
+        
+        # No rollover needed - reuse existing session
+        if current_session:
+            logger.debug("DAILY_SESSION_REUSED: Store %s date=%s", store_id, new_date)
+            return current_session
+        
+        # First session for this store
+        new_session = StoreSession(
+            store_id=store_id,
+            sequence_id=str(uuid.uuid4()),
+            current_date=new_date,
+            active=True,
+        )
+        self.store_sessions[store_id] = new_session
+        await self._ensure_store_session(store_id)
+        
+        logger.info(
+            "DAILY_SESSION_CREATED: Store %s date=%s sequence_id=%s",
+            store_id, new_date, new_session.sequence_id
+        )
+        
+        return new_session
 
     async def handle_event(self, event: dict):
         """Обработчик Kafka событий."""
@@ -607,7 +903,7 @@ class StreamingDiarizationWorker:
         if event.get("type") != "audio_chunk_saved":
             return
 
-        session_id = event.get("session_id")
+        vad_session_id = event.get("session_id")
         timestamp_ms = event.get("timestamp_ms")  # ← Unix timestamp (абсолютное время)
         payload = event.get("payload", {})
 
@@ -616,19 +912,29 @@ class StreamingDiarizationWorker:
         size_bytes = payload.get("size_bytes", 0)
         is_end = payload.get("is_end", False)
 
-        if not session_id or chunk_id is None or not s3_key or not timestamp_ms:
+        if not vad_session_id or chunk_id is None or not s3_key or not timestamp_ms:
             logger.warning("Invalid event: missing required fields")
             return
 
         # Extract store_id
-        store_id = self._get_store_id_from_session(session_id)
+        store_id = self._get_store_id_from_session(vad_session_id)
+        
+        # Extract date from VAD session_id
+        chunk_date = get_date_from_vad_session_id(vad_session_id)
 
         async with self.session_locks[store_id]:
+            # Handle daily session rollover
+            session = await self._handle_daily_session_rollover(store_id, chunk_date)
+            
+            # If session is None, it means this is a late chunk - ignore it
+            if session is None:
+                return
+            
             # Вычисляем длительность чанка
             duration_ms = calculate_chunk_duration_ms(size_bytes)
             
             # Обновляем временную шкалу для store_id
-            await self._update_timeline(store_id, session_id, chunk_id, timestamp_ms, duration_ms, is_end)
+            await self._update_timeline(store_id, vad_session_id, chunk_id, timestamp_ms, duration_ms, is_end)
             
             # Download chunk
             wav_bytes = await self.get_s3_object(s3_key)
@@ -641,11 +947,8 @@ class StreamingDiarizationWorker:
             
             audio_array = np.frombuffer(pcm_data, dtype=np.int16)
             
-            # Ensure session exists
-            session = await self._ensure_store_session(store_id)
-            
             # Add to buffer
-            session.audio_buffer.append((session_id, chunk_id, audio_array, is_end))
+            session.audio_buffer.append((vad_session_id, chunk_id, audio_array, is_end))
             session.buffered_duration_ms += duration_ms
             self.stats['total_chunks_processed'] += 1
             
@@ -706,6 +1009,107 @@ class StreamingDiarizationWorker:
         )
         logger.info("=" * 70 + "\n")
 
+    async def _schedule_daily_finalization(self):
+        """
+        Schedule daily finalization at 22:00 Moscow time.
+        
+        This method runs continuously and triggers finalization at 22:00 each day.
+        """
+        logger.info("DAILY_FINALIZATION_SCHEDULER_STARTED: Will finalize at 22:00 Moscow time")
+        
+        while self.finalization_enabled:
+            try:
+                now_moscow = datetime.now(MOSCOW_TZ)
+                target_time = now_moscow.replace(hour=22, minute=0, second=0, microsecond=0)
+                
+                # If target time is in the past, schedule for tomorrow
+                if target_time <= now_moscow:
+                    from datetime import timedelta
+                    target_time += timedelta(days=1)
+                
+                # Calculate wait time in seconds
+                wait_seconds = (target_time - now_moscow).total_seconds()
+                
+                logger.info(
+                    "DAILY_FINALIZATION_SCHEDULED: Next finalization at %s (in %.0f seconds)",
+                    target_time.strftime("%Y-%m-%d %H:%M:%S %Z"), wait_seconds
+                )
+                
+                # Wait until target time
+                await asyncio.sleep(wait_seconds)
+                
+                # Trigger finalization
+                await self._trigger_daily_finalization()
+                
+            except Exception as e:
+                logger.exception("DAILY_FINALIZATION_SCHEDULER_ERROR: %s", e)
+                # Wait 1 minute before retrying
+                await asyncio.sleep(60)
+
+    async def _trigger_daily_finalization(self):
+        """
+        Trigger finalization of all active daily sessions.
+        
+        This is called by the scheduler at 22:00 Moscow time.
+        """
+        logger.info("DAILY_FINALIZATION_STARTED: Triggering finalization for all active sessions")
+        
+        now_moscow = datetime.now(MOSCOW_TZ)
+        target_date = now_moscow.strftime("%Y-%m-%d")
+        
+        # Get all active sessions
+        active_sessions = [
+            (store_id, session) 
+            for store_id, session in self.store_sessions.items() 
+            if session.active and session.total_chunks > 0
+        ]
+        
+        logger.info(
+            "DAILY_FINALIZATION_STORE_COUNT: Found %d active sessions to finalize",
+            len(active_sessions)
+        )
+        
+        # Finalize each session independently
+        failed_count = 0
+        success_count = 0
+        
+        for store_id, session in active_sessions:
+            try:
+                async with self.session_locks[store_id]:
+                    logger.info(
+                        "DAILY_FINALIZATION_STORE_STARTED: Store %s date=%s session_id=%s chunks=%d segments=%d",
+                        store_id, session.current_date,
+                        f"{session.current_date}_{store_id}",
+                        session.total_chunks, len(session.absolute_speaker_segments)
+                    )
+                    
+                    start_time = time.time()
+                    
+                    # Finalize the session
+                    await self._finalize_daily_session(session)
+                    
+                    duration = time.time() - start_time
+                    
+                    logger.info(
+                        "DAILY_FINALIZATION_STORE_COMPLETED: Store %s date=%s segments=%d speakers=%d duration=%.2fs",
+                        store_id, session.current_date,
+                        len(session.absolute_speaker_segments), len(session.speaker_ids), duration
+                    )
+                    
+                    success_count += 1
+                    
+            except Exception as e:
+                logger.exception(
+                    "DAILY_FINALIZATION_STORE_FAILED: Store %s date=%s error=%s",
+                    store_id, session.current_date, e
+                )
+                failed_count += 1
+        
+        logger.info(
+            "DAILY_FINALIZATION_COMPLETED: Success=%d Failed=%d Total=%d",
+            success_count, failed_count, len(active_sessions)
+        )
+
     async def start(self):
         """Initialize database pool."""
         self.db_pool = await asyncpg.create_pool(self.db_dsn)
@@ -731,9 +1135,15 @@ class StreamingDiarizationWorker:
             return
         
         try:
+            # Get current_date from session
+            session = self.store_sessions.get(store_id)
+            if session and session.current_date:
+                date_str = session.current_date
+            else:
+                date_str = datetime.now(MOSCOW_TZ).strftime("%Y-%m-%d")
+            
             # Generate session_id: YYYY-MM-DD_STORE_ID
-            today = datetime.now(MOSCOW_TZ).strftime("%Y-%m-%d")
-            session_id = f"{today}_{store_id}"
+            session_id = f"{date_str}_{store_id}"
             
             # Format segments for storage
             speakers_json = json.dumps(segments, ensure_ascii=False)
@@ -784,6 +1194,10 @@ class StreamingDiarizationWorker:
         await consumer.start()
         logger.info("🚀 Streaming Diarization Worker started")
 
+        # Start finalization scheduler
+        self.finalization_task = asyncio.create_task(self._schedule_daily_finalization())
+        logger.info("Finalization scheduler started")
+
         # Summary timer
         last_summary_time = time.time()
         summary_interval = 60  # seconds
@@ -804,6 +1218,16 @@ class StreamingDiarizationWorker:
                 except Exception as e:
                     logger.exception("Failed to process Kafka message: %s", str(e))
         finally:
+            # Stop finalization scheduler
+            self.finalization_enabled = False
+            if self.finalization_task:
+                self.finalization_task.cancel()
+                try:
+                    await self.finalization_task
+                except asyncio.CancelledError:
+                    pass
+                logger.info("Finalization scheduler stopped")
+            
             # Cleanup
             logger.info("Shutting down streaming sessions...")
             

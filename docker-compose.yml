@@ -301,6 +301,8 @@ services:
         --load-model online_vad
         --load-model offline_vad
         --load-model diarization
+        --load-model diarization_online
+        --load-model pyannet
         --load-model vad
         --load-model embedder
         --load-model clusterer
@@ -349,7 +351,7 @@ services:
       S3_BUCKET: audio-sessions
 
       TRITON_URL: server_triton-speech-segmentation:8001
-      TRITON_MODEL: diarization  # Use offline model (streaming not yet supported)
+      TRITON_MODEL: diarization_online
 
       PYTHONUNBUFFERED: 1
 
