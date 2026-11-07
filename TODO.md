@@ -8,6 +8,31 @@
 
 ## P0 (критичные — качество клиентских миссий с покупкой)
 
+- [x] **Абсолютные временные метки для слов ASR (2026-11-06).**
+     Реализован расчёт и сохранение абсолютного времени начала и окончания каждого распознанного слова.
+     Решение:
+     - `hhmmss_to_unix_ms()` — конвертация YYYYmmdd-HHMMSS из session_id в Unix timestamp (ms)
+     - `get_vad_session_start_ms()` — извлечение времени начала VAD-сессии из session_id
+     - `add_absolute_timestamps_to_words()` — добавление absolute_start_ms и absolute_end_ms к каждому слову
+     - Формула: `absolute_time = vad_session_start + word_time` (без дополнительных offset)
+     - Сохранение в БД: слова с относительными и абсолютными timestamps в JSONB поле `words`
+     Тесты: 18 тестов, все пройдены.
+     Проверка: `scripts/check_asr_word_timestamps.py`
+     Файлы: `asr_worker/repo.py`, `tests/test_asr_word_timestamps.py`, `scripts/check_asr_word_timestamps.py`
+
+- [x] **Абсолютные временные метки для streaming диаризации (2026-11-06).**
+     Реализован расчёт и сохранение абсолютного времени сегментов диаризации с учётом gaps между VAD-сессиями.
+     Решение:
+     - `relative_to_absolute_time()` — конвертация относительного времени в абсолютное с учётом cumulative duration
+     - `save_diarization_result()` — немедленное сохранение в БД после каждого ответа от модели
+     - Database pool initialization для немедленных сохранений
+     - Формула: ищем VAD сессию, содержащую relative_ms, затем `absolute = vad_session.start_ms + offset_in_session`
+     - Сохранение в БД: сегменты с абсолютными и относительными timestamps в JSONB поле `speakers`
+     Тесты: 22 теста (14 unit + 8 integration), все пройдены.
+     Deployment: пересобран образ, перезапущен контейнер с bucket `audio-sessions`
+     Проверка: SQL запросы к `diarization_results.speakers`
+     Файлы: `diarization_worker/streaming_diarization_worker.py`, `tests/test_diarization_timestamps.py`, `tests/test_streaming_diarization_integration.py`
+
 Приоритет внутри P0:
 1. **recall реальных покупок** (каждая GT-продажа найдена как клиентская миссия);
 2. **корректное выделение миссии, в которой была покупка** (не сдвинута/не обрублена);
@@ -63,10 +88,22 @@
    v12: объединены в 09:52:43-10:18:28 (service), 10:15:22 пропущен.
    Нужно: отключить merge для этих сегментов или уменьшить threshold.
 - [ ] **Исправить segmentation LLM для вопросов о пробеге (15:39:00 ВЛКСМ 20.10.2026).**
-   Проблема: segment_029 (15:39:00-15:43:42) содержит вопрос "сколько в за год проезжаете" но segmentation LLM классифицирует как employee (confidence 0.9).
-   Classification LLM правильно видит это как customer (confidence 0.75, mission=Купить).
-   Prompt обновлён 5 раз (v12-v17), но segmentation LLM игнорирует правила.
-   Нужно: попробовать few-shot примеры или другой подход к prompt.
+    Проблема: segment_029 (15:39:00-15:43:42) содержит вопрос "сколько в за год проезжаете" но segmentation LLM классифицирует как employee (confidence 0.9).
+    Classification LLM правильно видит это как customer (confidence 0.75, mission=Купить).
+    Prompt обновлён 5 раз (v12-v17), но segmentation LLM игнорирует правила.
+    Нужно: попробовать few-shot примеры или другой подход к prompt.
+
+- [x] **Расчёт абсолютного времени для streaming diarization с учётом gaps между VAD сессиями (2026-11-06).**
+    Реализована корректная конвертация относительного времени диаризации в абсолютные Unix timestamps.
+    Решение:
+    - `hhmmss_to_unix_ms()` — конвертация YYYYmmdd-HHMMSS из session_id в Unix timestamp (ms)
+    - `parse_session_id()` — парсинг session_id для извлечения даты и времени
+    - `relative_to_absolute_time()` — конвертация с учётом gaps между VAD сессиями
+    - `_update_timeline()` — обновление временной шкалы с использованием времени из session_id
+    - `save_diarization_result()` — немедленное сохранение сегментов в БД после каждого ответа от модели
+    Тесты: 22 теста (14 unit + 8 integration), все пройдены.
+    Документация: `docs/streaming_diarization_timestamps.md`
+    Файлы: `diarization_worker/streaming_diarization_worker.py`, `tests/test_diarization_timestamps.py`, `tests/test_streaming_diarization_integration.py`
 
 ## P1 (следующие — структура и стабильность качества)
 

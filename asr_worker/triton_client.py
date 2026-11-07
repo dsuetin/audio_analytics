@@ -64,6 +64,14 @@ class TritonASRClient:
         while True:
             item = await queue.get()
             pcm, is_last = item
+            params = {
+                "interim_results": True,
+                # "pure_online": True,
+            }
+            # enable_word_time_offsets только для финализации
+            if is_last:
+                params["enable_word_time_offsets"] = True
+
             yield {
                 "model_name": ONLINE_MODEL if not is_last else FINAL_MODEL,
                 "inputs": [self._make_input(pcm)],
@@ -73,10 +81,7 @@ class TritonASRClient:
                 "sequence_id": seq_id,
                 "sequence_start": seq_start,
                 "sequence_end": is_last,
-                "parameters": {
-                    "interim_results": True,
-                    # "pure_online": True,
-                },
+                "parameters": params,
             }
 
             seq_start = False
@@ -128,14 +133,36 @@ class TritonASRClient:
                 text = hyp.normalized_transcript or hyp.transcript
                 self.latest_text[session_id] = text
 
-                await self.asr_events.put(
-                    {
-                        "session_id": session_id,
-                        "chunk_id": chunk_id,
-                        "text": text,
-                        "is_final": is_final,
-                    }
-                )
+                # Log alignment info
+                if is_final and hyp.words:
+                    logger.info(
+                        "ASR FINAL session=%s words=%d: %r",
+                        session_id,
+                        len(hyp.words),
+                        hyp.transcript[:80],
+                    )
+
+                # Build event
+                event = {
+                    "session_id": session_id,
+                    "chunk_id": chunk_id,
+                    "text": text,
+                    "is_final": is_final,
+                }
+
+                # Add alignment words only for final results (backwards compatible)
+                if is_final and hyp.words:
+                    event["words"] = [
+                        {
+                            "word": w.word,
+                            "start_time_ms": w.start_time_ms,
+                            "end_time_ms": w.end_time_ms,
+                            "confidence": w.confidence,
+                        }
+                        for w in hyp.words
+                    ]
+
+                await self.asr_events.put(event)
         except Exception:
             logger.exception("ASR stream consume failed session=%s", session_id)
 

@@ -81,22 +81,30 @@ class ASRWorker:
 
             try:
                 meta = parse_session_id(event["session_id"])
+                
+                # Build Kafka message (backwards compatible)
+                kafka_msg = {
+                    "session_id": event["session_id"],
+                    "store_id": meta["store_id"],
+                    "seller_id": meta["seller_id"],
+                    "chunk_id": event["chunk_id"],
+                    "text": event["text"],
+                    "is_final": event["is_final"],
+                }
+                # Add words if present (backwards compatible)
+                if "words" in event:
+                    kafka_msg["words"] = event["words"]
+                
                 await self.producer.send(
                     "asr_transcripts",
-                    {
-                        "session_id": event["session_id"],
-                        "store_id": meta["store_id"],
-                        "seller_id": meta["seller_id"],
-                        "chunk_id": event["chunk_id"],
-                        "text": event["text"],
-                        "is_final": event["is_final"],
-                    },
+                    kafka_msg,
                 )
 
                 await self.repo.save(
                     session_id=event["session_id"],
                     text=event["text"],
                     is_final=event["is_final"],
+                    words=event.get("words"),
                 )
 
             except Exception:
