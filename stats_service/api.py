@@ -143,6 +143,48 @@ def get_session_time_seconds(session_id: str):
         return None
 
 
+def get_session_duration_seconds(s3_client, session_id: str) -> float:
+    """Get session duration in seconds by counting samples from S3 chunks.
+    
+    Returns duration in seconds or 0.0 if unable to calculate.
+    """
+    import re
+    
+    session_prefix = f"audio/{session_id}/"
+    chunk_files = []
+
+    paginator = s3_client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=S3_BUCKET, Prefix=session_prefix):
+        if "Contents" in page:
+            for obj in page["Contents"]:
+                key = obj["Key"]
+                parts = key.split("/")
+                if len(parts) >= 3:
+                    filename = parts[2]
+                    if re.fullmatch(r"\d+\.wav", filename):
+                        chunk_files.append((filename, key))
+
+    if not chunk_files:
+        return 0.0
+    
+    chunk_files.sort(key=lambda x: int(os.path.splitext(x[0])[0]))
+    total_samples = 0
+    sample_rate = 16000
+
+    for filename, chunk_key in chunk_files:
+        try:
+            obj = s3_client.get_object(Bucket=S3_BUCKET, Key=chunk_key)
+            chunk_data = obj["Body"].read()
+            
+            with io.BytesIO(chunk_data) as bio, wave.open(bio, "rb") as wf:
+                total_samples += wf.getnframes()
+                sample_rate = wf.getframerate()
+        except Exception:
+            pass
+
+    return total_samples / sample_rate if sample_rate > 0 else 0.0
+
+
 def download_session_chunks(s3_client, session_id: str) -> bytes:
     """Download all chunks for a session, extract PCM from each, and concatenate
     
@@ -3616,8 +3658,17 @@ def download_audio(
 
         filtered_sessions = []
         for session in all_sessions:
-            session_seconds = get_session_time_seconds(session)
-            if session_seconds is not None and start_seconds <= session_seconds < end_seconds:
+            session_start = get_session_time_seconds(session)
+            if session_start is None:
+                continue
+            
+            # Calculate session end time using duration from S3 chunks
+            session_duration = get_session_duration_seconds(s3_client, session)
+            session_end = session_start + session_duration
+            
+            # Include session if it overlaps with requested time range
+            # Overlap condition: session_start < end_seconds AND session_end > start_seconds
+            if session_start < end_seconds and session_end > start_seconds:
                 filtered_sessions.append(session)
 
         if not filtered_sessions:
