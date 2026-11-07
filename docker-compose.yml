@@ -321,7 +321,42 @@ services:
 
     restart: unless-stopped
 
-    
+  streaming_diarization_worker:
+    image: audio_analytics-diarization_worker:latest
+    build:
+      context: diarization_worker
+      dockerfile: Dockerfile
+
+    container_name: streaming-diarization-worker
+    mem_limit: 4G
+    memswap_limit: 4G
+    networks:
+      - speech
+
+    depends_on:
+      - redpanda
+      - minio
+      - vad
+
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      KAFKA_TOPIC: audio_events
+      KAFKA_GROUP: streaming-diarization-worker-v1
+
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_ACCESS_KEY_ID: minioadmin
+      S3_SECRET_ACCESS_KEY: minioadmin
+      S3_BUCKET: audio-sessions
+
+      TRITON_URL: server_triton-speech-segmentation:8001
+      TRITON_MODEL: diarization  # Use offline model (streaming not yet supported)
+
+      PYTHONUNBUFFERED: 1
+
+    command: ["python", "streaming_diarization_worker.py"]
+
+    restart: unless-stopped
+
   classification_service:
     image: audio_analytics-classification_service:latest
     build:

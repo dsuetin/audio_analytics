@@ -2,7 +2,259 @@
 
 > Единый источник «какое состояние проекта сейчас» для OpenCode/агентов.
 > Обновлять в каждом рабочем сеансе. Детали задач — в `TODO.md`. Агентовый entry point — `AGENTS.md`.
-> Последнее обновление: 2026-10-24 (v35: приоритет buy > service, Dovatorceva 18 строк, 09:02-09:11=buy, 09:27-09:45=buy, 09:45-09:50=buy).
+> Последнее обновление: 2026-11-06 (ASR word absolute timestamps + streaming diarization gap handling).
+
+## Итог сессии 2026-11-06 (streaming diarization: absolute timestamp calculation с учётом gaps между VAD сессиями)
+
+### Задача
+Реализовать корректный расчёт абсолютного времени сегментов диаризации с учётом временных разрывов между VAD-сессиями.
+
+### Проблема
+Модель диаризации в streaming режиме накапливает спикеров по store_id в течение дня, получая аудио из нескольких VAD-сессий. Между VAD-сессиями бывают промежутки тишины, когда аудио не передаётся в модель.
+
+Пример:
+- 10:00:00-10:00:02: Первая VAD-сессия (2 сек аудио)
+- 10:00:02-10:00:05: Тишина (3 сек, аудио не передаётся)
+- 10:00:05-10:00:06: Вторая VAD-сессия (1 сек аудио)
+
+Модель диаризации видит склеенное аудио без учёта тишины:
+- 0-2000 мс: Первая VAD-сессия
+- 2000-3000 мс: Вторая VAD-сессия (без 3-секундного gap)
+
+Результат диаризации содержит относительное время (0-3000 мс), но нужно сохранить абсолютное время (0-6000 мс с учётом gap).
+
+### Решение
+
+**1. Функция конвертации времени** (`diarization_worker/streaming_diarization_worker.py:94-115`):
+```python
+def hhmmss_to_unix_ms(date_str: str, time_str: str, tz: ZoneInfo = MOSCOW_TZ) -> int:
+    """Конвертирует YYYYmmdd и HHMMSS из session_id в Unix timestamp (ms)."""
+```
+
+**2. Парсинг session_id** (`diarization_worker/streaming_diarization_worker.py:117-134`):
+```python
+def parse_session_id(session_id: str) -> Dict[str, str]:
+    """Извлекает date, time, store_id, seller_id из session_id."""
+```
+
+**3. Конвертация относительного → абсолютного времени** (`diarization_worker/streaming_diarization_worker.py:136-173`):
+```python
+def relative_to_absolute_time(session: 'StoreSession', relative_ms: int) -> int:
+    """Находит в какой VAD сессии находится relative_ms и конвертирует в абсолютное время."""
+```
+
+**4. Обновление timeline** (`diarization_worker/streaming_diarization_worker.py:275-337`):
+- При chunk_id=1 (начало VAD сессии) извлекаем время из session_id
+- Сохраняем VADSession с start_ms (абсолютное время начала)
+- Учёт gaps между VAD сессиями
+
+**5. Немедленное сохранение в БД** (`diarization_worker/streaming_diarization_worker.py:625-642`):
+```python
+async def save_diarization_result(self, store_id: str, segments: List[dict]):
+    """Сохраняет сегменты с абсолютными timestamps в diarization_results сразу после получения."""
+```
+Вызывается в `_check_for_responses()` после каждой обработки ответа от модели диаризации.
+
+### Результат: ✅ УСПЕХ
+
+| Сценарий | Статус |
+|---|---|
+| Две VAD-сессии с gap 3 сек | ✅ Второй сегмент: 5-6 сек (абсолютное) |
+| Несколько VAD-сессий с разными gaps | ✅ Корректный расчёт для каждой |
+| Без gaps (back-to-back) | ✅ Линейный расчёт |
+| Задержка Kafka | ✅ Используется время из session_id |
+| Повторная обработка | ✅ Нет дублирования смещения |
+| Граница дня | ✅ Корректная обработка дат |
+
+**Тесты:**
+- `tests/test_diarization_timestamps.py` — 14 тестов, все пройдены
+- `tests/test_streaming_diarization_integration.py` — 8 тестов, все пройдены
+
+### Ключевые изменения в коде
+
+1. **streaming_diarization_worker.py:94-115** — `hhmmss_to_unix_ms()` для конвертации времени из session_id
+2. **streaming_diarization_worker.py:117-134** — `parse_session_id()` для парсинга session_id
+3. **streaming_diarization_worker.py:136-173** — `relative_to_absolute_time()` для конвертации времени
+4. **streaming_diarization_worker.py:275-337** — `_update_timeline()` с использованием времени из session_id
+5. **streaming_diarization_worker.py:504-506** — немедленное сохранение в БД после каждого ответа
+
+### Архитектурные детали
+
+- **Timezone**: session_id использует Moscow time (UTC+3), конвертация через `ZoneInfo('Europe/Moscow')`
+- **Primary key**: В БД используется store_id как session_id для streaming (одна запись на магазин в день)
+- **Segments format**: JSONB с absolute_start_ms, absolute_end_ms, relative_start_ms, relative_end_ms
+- **Gap handling**: Gaps автоматически учитываются при конвертации через поиск VAD сессии
+
+---
+
+## Итог сессии 2026-11-06 (ASR word absolute timestamps)
+
+### Задача
+Добавить абсолютные временные метки для каждого распознанного слова ASR.
+
+### Проблема
+ASR возвращает слова с относительными временными метками относительно начала VAD-сессии.
+Для корреляции с диаризацией и другими данными нужны абсолютные Unix timestamps.
+
+Пример:
+- VAD-сессия началась в 10:00:00
+- ASR вернул слово "Привет" с start_time_ms=500, end_time_ms=900
+- Нужно сохранить: absolute_start_ms=10:00:00.500, absolute_end_ms=10:00:00.900
+
+### Решение
+
+**1. Извлечение времени начала VAD-сессии** (`asr_worker/repo.py:38-56`):
+```python
+def get_vad_session_start_ms(session_id: str) -> int | None:
+    """Извлекает время начала VAD-сессии из session_id (YYYYmmdd-HHMMSS)."""
+```
+
+**2. Добавление абсолютных timestamps к словам** (`asr_worker/repo.py:58-89`):
+```python
+def add_absolute_timestamps_to_words(words: list[dict], session_id: str) -> list[dict]:
+    """Добавляет absolute_start_ms и absolute_end_ms к каждому слову."""
+```
+
+**Формула (без дополнительных offset):**
+```python
+absolute_start_ms = vad_session_start + word_start_time_ms
+absolute_end_ms = vad_session_start + word_end_time_ms
+```
+
+**3. Сохранение в БД** (`asr_worker/repo.py:107-109`):
+```python
+if words:
+    words_with_absolute = add_absolute_timestamps_to_words(words, session_id)
+    words_json = json.dumps(words_with_absolute, ensure_ascii=False)
+```
+
+### Результат: ✅ УСПЕХ
+
+| Критерий | Статус |
+|---|---|
+| Расчёт времени для каждого слова | ✅ |
+| Несколько слов в одной VAD-сессии | ✅ |
+| Несколько последовательных VAD-сессий | ✅ |
+| Корректность при задержке Kafka | ✅ (используется session_id) |
+| Отсутствие двойного смещения | ✅ (только vad_start + word_time) |
+| Сохранение относительных timestamps | ✅ |
+
+**Тесты:**
+- `tests/test_asr_word_timestamps.py` — 18 тестов, все пройдены
+
+**Проверка в БД:**
+- `scripts/check_asr_word_timestamps.py` — скрипт для проверки записей
+
+### Структура данных в БД
+
+```json
+{
+  "word": "Привет",
+  "start_time_ms": 500,           // ← Относительное время (сохранено)
+  "end_time_ms": 900,             // ← Относительное время (сохранено)
+  "absolute_start_ms": 1795170600500,  // ← Абсолютное Unix время (ms)
+  "absolute_end_ms": 1795170600900,    // ← Абсолютное Unix время (ms)
+  "confidence": 0.95
+}
+```
+
+### Ключевые изменения в коде
+
+1. **asr_worker/repo.py:38-56** — `get_vad_session_start_ms()` для извлечения времени из session_id
+2. **asr_worker/repo.py:58-89** — `add_absolute_timestamps_to_words()` для добавления абсолютных timestamps
+3. **asr_worker/repo.py:107-109** — вызов конвертации перед сохранением в БД
+
+### Архитектурные детали
+
+- **Timezone**: session_id использует Moscow time (UTC+3), конвертация через `ZoneInfo('Europe/Moscow')`
+- **Formula**: `absolute = vad_session_start + word_time` (без дополнительных offset)
+- **Backwards compatible**: относительные timestamps сохраняются для совместимости
+- **No algorithm changes**: не меняет работу ASR, VAD или диаризации
+
+---
+
+## Итог сессии 2026-10-24 (v20-v32: post-processing для background сегментов, разбиение длинных сегментов, классификация buy)
+
+### Задача
+Реализовать корректный расчёт абсолютного времени сегментов диаризации с учётом временных разрывов между VAD-сессиями.
+
+### Проблема
+Модель диаризации в streaming режиме накапливает спикеров по store_id в течение дня, получая аудио из нескольких VAD-сессий. Между VAD-сессиями бывают промежутки тишины, когда аудио не передаётся в модель.
+
+Пример:
+- 10:00:00-10:00:02: Первая VAD-сессия (2 сек аудио)
+- 10:00:02-10:00:05: Тишина (3 сек, аудио не передаётся)
+- 10:00:05-10:00:06: Вторая VAD-сессия (1 сек аудио)
+
+Модель диаризации видит склеенное аудио без учёта тишины:
+- 0-2000 мс: Первая VAD-сессия
+- 2000-3000 мс: Вторая VAD-сессия (без 3-секундного gap)
+
+Результат диаризации содержит относительное время (0-3000 мс), но нужно сохранить абсолютное время (0-6000 мс с учётом gap).
+
+### Решение
+
+**1. Функция конвертации времени** (`diarization_worker/streaming_diarization_worker.py:94-115`):
+```python
+def hhmmss_to_unix_ms(date_str: str, time_str: str, tz: ZoneInfo = MOSCOW_TZ) -> int:
+    """Конвертирует YYYYmmdd и HHMMSS из session_id в Unix timestamp (ms)."""
+```
+
+**2. Парсинг session_id** (`diarization_worker/streaming_diarization_worker.py:117-134`):
+```python
+def parse_session_id(session_id: str) -> Dict[str, str]:
+    """Извлекает date, time, store_id, seller_id из session_id."""
+```
+
+**3. Конвертация относительного → абсолютного времени** (`diarization_worker/streaming_diarization_worker.py:136-173`):
+```python
+def relative_to_absolute_time(session: 'StoreSession', relative_ms: int) -> int:
+    """Находит в какой VAD сессии находится relative_ms и конвертирует в абсолютное время."""
+```
+
+**4. Обновление timeline** (`diarization_worker/streaming_diarization_worker.py:275-337`):
+- При chunk_id=1 (начало VAD сессии) извлекаем время из session_id
+- Сохраняем VADSession с start_ms (абсолютное время начала)
+- Учёт gaps между VAD сессиями
+
+**5. Немедленное сохранение в БД** (`diarization_worker/streaming_diarization_worker.py:625-642`):
+```python
+async def save_diarization_result(self, store_id: str, segments: List[dict]):
+    """Сохраняет сегменты с абсолютными timestamps в diarization_results сразу после получения."""
+```
+Вызывается в `_check_for_responses()` после каждой обработки ответа от модели диаризации.
+
+### Результат: ✅ УСПЕХ
+
+| Сценарий | Статус |
+|---|---|
+| Две VAD-сессии с gap 3 сек | ✅ Второй сегмент: 5-6 сек (абсолютное) |
+| Несколько VAD-сессий с разными gaps | ✅ Корректный расчёт для каждой |
+| Без gaps (back-to-back) | ✅ Линейный расчёт |
+| Задержка Kafka | ✅ Используется время из session_id |
+| Повторная обработка | ✅ Нет дублирования смещения |
+| Граница дня | ✅ Корректная обработка дат |
+
+**Тесты:**
+- `tests/test_diarization_timestamps.py` — 14 тестов, все пройдены
+- `tests/test_streaming_diarization_integration.py` — 8 тестов, все пройдены
+
+### Ключевые изменения в коде
+
+1. **streaming_diarization_worker.py:94-115** — `hhmmss_to_unix_ms()` для конвертации времени из session_id
+2. **streaming_diarization_worker.py:117-134** — `parse_session_id()` для парсинга session_id
+3. **streaming_diarization_worker.py:136-173** — `relative_to_absolute_time()` для конвертации времени
+4. **streaming_diarization_worker.py:275-337** — `_update_timeline()` с использованием времени из session_id
+5. **streaming_diarization_worker.py:625-642** — `save_diarization_result()` для сохранения в БД
+
+### Архитектурные детали
+
+- **Timezone**: session_id использует Moscow time (UTC+3), конвертация через `ZoneInfo('Europe/Moscow')`
+- **Primary key**: В БД используется store_id как session_id для streaming (одна запись на магазин в день)
+- **Segments format**: JSONB с absolute_start_ms, absolute_end_ms, relative_start_ms, relative_end_ms
+- **Gap handling**: Gaps автоматически учитываются при конвертации через поиск VAD сессии
+
+---
 
 ## Итог сессии 2026-10-24 (v20-v32: post-processing для background сегментов, разбиение длинных сегментов, классификация buy)
 
@@ -1308,5 +1560,60 @@ llm_errors=0.** Статус: **ALL FINAL VALID + ALL PDF VALID** (pdfinfo 1–1
 2. Если есть конкретные pattern ложных срабатываний — точечный prompt-изменение
    **на чистую GT** (не blind).
 3. P0 по 08-27 (sales GT recall=0.325, см. TODO.md) — отдельный эксперимент,
-   не связан с 09-03 segmentation.
+    не связан с 09-03 segmentation.
+
+---
+
+## Итог сессии 2026-11-06 (absolute timestamps: ASR words + streaming diarization)
+
+### Задача
+Реализовать расчёт и сохранение абсолютных временных меток (Unix timestamps) для:
+1. ASR слов — `absolute_start_ms` и `absolute_end_ms`
+2. Сегментов диаризации — `absolute_start_ms` и `absolute_end_ms` с учётом gaps между VAD-сессиями
+
+### Решение
+
+**ASR слова** (`asr_worker/repo.py:78-107`):
+```python
+def add_absolute_timestamps_to_words(words: list[dict], session_id: str) -> list[dict]:
+    """Добавляет absolute_start_ms и absolute_end_ms к каждому слову на основе session_id."""
+```
+
+**Streaming диаризация** (`diarization_worker/streaming_diarization_worker.py:133-174`):
+```python
+def relative_to_absolute_time(session: 'StoreSession', relative_ms: int) -> int:
+    """Конвертирует относительное время в абсолютное с учётом gaps между VAD-сессиями."""
+```
+
+### Результат
+
+✅ **ASR слова**: абсолютные timestamps сохраняются в `transcripts.words`
+- `absolute_start_ms`: 1793969328668 (пример)
+- `absolute_end_ms`: рассчитывается аналогично
+
+✅ **Streaming диаризация**: абсолютные timestamps сохраняются в `diarization_results.speakers`
+- `absolute_start_ms`: 1793964514000 (пример)
+- `absolute_end_ms`: 1793964516090 (пример)
+- `relative_start_ms`: 0 (сохраняется для отладки)
+- `relative_end_ms`: 2090 (сохраняется для отладки)
+
+### Deployment
+
+1. Пересобраны образы: `docker compose build asr_worker streaming_diarization_worker`
+2. Перезапущены контейнеры: `docker restart asr_worker streaming-diarization-worker`
+3. **Важно**: streaming-diarization-worker использует bucket `audio-sessions` (не `audio`)
+4. Оффлайн diarization-worker остановлен: `docker stop diarization-worker`
+
+### Проверка
+
+```sql
+-- ASR слова с абсолютными timestamps
+SELECT session_id, (words->0->>'absolute_start_ms') as abs_start 
+FROM transcripts WHERE store_id = 'г_Ставрополь_ул._Доваторцев_62_А' LIMIT 3;
+
+-- Диаризация с абсолютными timestamps
+SELECT session_id, (speakers->0->>'absolute_start_ms') as abs_start, 
+       (speakers->0->>'relative_start_ms') as rel_start
+FROM diarization_results WHERE store_id = 'г_Ставрополь_ул._Доваторцев_62_А' LIMIT 3;
+```
 
