@@ -2,7 +2,79 @@
 
 > Единый источник «какое состояние проекта сейчас» для OpenCode/агентов.
 > Обновлять в каждом рабочем сеансе. Детали задач — в `TODO.md`. Агентовый entry point — `AGENTS.md`.
-> Последнее обновление: 2026-11-07 (Diarization Replay Test Stand + stream recovery + 22:00 finalization).
+> Последнее обновление: 2026-11-07 (Partial Finalization Implementation + Diarization Replay Test Stand).
+
+## Итог сессии 2026-11-07 (Partial Finalization + Diarization Replay Test Stand)
+
+### Partial Finalization Implementation — Готово к тестированию
+
+**Задача:** Реализовать partial finalization для получения промежуточных результатов диаризации после каждой VAD сессии без потери speaker IDs.
+
+**Статус:** ✅ **РЕАЛИЗОВАНО, ГОТОВО К ТЕСТИРОВАНИЮ**
+
+**Реализация:**
+
+1. **Модель `diarization_online` (`model_impl.py`):**
+   - ✅ Добавлен параметр `partial_finalization` (строка 267)
+   - ✅ Модифицирована логика удаления state (строка 552-567)
+   - ✅ Partial finalization: state сохраняется, COMPLETE_FINAL не отправляется
+   - ✅ Full finalization: state удаляется, COMPLETE_FINAL отправляется
+
+2. **Worker (`streaming_diarization_worker.py`):**
+   - ✅ Метод `_send_partial_finalization_request()` (строка 773)
+   - ✅ Метод `_send_finalization_request()` обновлён (явно `partial_finalization="False"`)
+   - ✅ Метод `_check_for_responses()` с флагом `is_partial_finalization`
+   - ✅ Обработка VAD session end (строка 1176-1180)
+   - ✅ Partial: сегменты добавляются, Full: сегменты заменяются
+
+3. **Тестовый скрипт:** `scripts/test_partial_finalization.py`
+   - ✅ Тест partial finalization (без удаления state)
+   - ✅ Тест full finalization (с удалением state)
+   - ✅ Проверка консистентности speaker IDs
+
+**Бэкапы:**
+- Model: `/mnt/models/diarization_online/1/model_impl.py.backup_before_partial_finalization`
+- Worker: `/home/developer/devbox/audio_analytics/backups/partial_finalization_20261107_190008/`
+
+**Документация:**
+- `PARTIAL_FINALIZATION_IMPLEMENTATION.md` — полная документация
+- `BACKUP_CHECKLIST.md` — чеклист бэкапов и rollback
+
+**Как работает:**
+
+1. **Partial Finalization** (после каждой VAD сессии):
+   ```
+   is_end=True → _send_partial_finalization_request()
+   → partial_finalization="True", sequence_end=False
+   → Модель: результаты + state сохраняется
+   → Speaker IDs: консистентны
+   → Сегменты: добавляются (не заменяются)
+   → БД: сохранение
+   ```
+
+2. **Full Finalization** (в 22:00 или смена дня):
+   ```
+   → _send_finalization_request()
+   → partial_finalization="False", sequence_end=True
+   → Модель: результаты + state удаляется
+   → Speaker IDs: сбрасываются
+   → Сегменты: заменяются
+   → БД: сохранение
+   → Triton сессия: закрытие
+   ```
+
+**Тестирование:**
+```bash
+python3 scripts/test_partial_finalization.py
+```
+
+**Rollback:**
+```bash
+docker exec server_triton-speech-segmentation cp /mnt/models/diarization_online/1/model_impl.py.backup_before_partial_finalization /mnt/models/diarization_online/1/model_impl.py
+docker exec server_triton-speech-segmentation tritoncli reload_model diarization_online
+```
+
+---
 
 ## Итог сессии 2026-11-07 (Diarization Replay Test Stand + Диагностика)
 

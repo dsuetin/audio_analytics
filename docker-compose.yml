@@ -558,53 +558,61 @@ services:
 
     restart: unless-stopped
 
-  # # Llama.cpp server 1 (GPU 0: f7e2dab1-0073-d8e6-2e0c-1b78dbba2db9)
-  # llama-8081:
-  #   <<: *llama-server
-  #   container_name: llama-server-8081
-  #   ports:
-  #     - "8081:8080"
-  #   volumes:
-  #     - /home/developer/models:/models:ro
-  #   deploy:
-  #     resources:
-  #       reservations:
-  #         devices:
-  #           - driver: nvidia
-  #             device_ids: ["nvidia.com/gpu=GPU-f7e2dab1-0073-d8e6-2e0c-1b78dbba2db9"]
-  #             capabilities: [gpu]
-  #   command: >
-  #     /usr/local/bin/llama-server
-  #     --model /models/Qwen3.5-27B-UD-Q4_K_XL.gguf
-  #     --host 0.0.0.0
-  #     --port 8080
-  #     -ngl 999
-  #     -c 131072
-  #     -np 1
+  # Llama.cpp server 1 (GPU 0: f7e2dab1-0073-d8e6-2e0c-1b78dbba2db9)
+  llama-8081:
+    <<: *llama-server
+    container_name: llama-server-8081
+    runtime: nvidia
+    restart: unless-stopped
+    mem_limit: 32g
+    memswap_limit: 36g
+    ports:
+      - "8081:8080"
+    volumes:
+      - /home/developer/models:/models:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["GPU-f7e2dab1-0073-d8e6-2e0c-1b78dbba2db9"]
+              capabilities: [gpu]
+    command: >
+      /usr/local/bin/llama-server
+      --model /models/Qwen3.8-27B-UD-Q4_K_XL.gguf
+      --host 0.0.0.0
+      --port 8080
+      -ngl 999
+      -c 131072
+      -np 1
 
-  # # Llama.cpp server 2 (GPU 1: f56e8753-2ccb-3e94-8251-e1a2072186a8)
-  # llama-8082:
-  #   <<: *llama-server
-  #   container_name: llama-server-8082
-  #   ports:
-  #     - "8082:8080"
-  #   volumes:
-  #     - /home/developer/models:/models:ro
-  #   deploy:
-  #     resources:
-  #       reservations:
-  #         devices:
-  #           - driver: nvidia
-  #             device_ids: ["nvidia.com/gpu=GPU-f56e8753-2ccb-3e94-8251-e1a2072186a8"]
-  #             capabilities: [gpu]
-  #   command: >
-  #     /usr/local/bin/llama-server
-  #     --model /models/Qwen3.5-27B-UD-Q4_K_XL.gguf
-  #     --host 0.0.0.0
-  #     --port 8080
-  #     -ngl 999
-  #     -c 131072
-  #     -np 1
+  # Llama.cpp server 2 (GPU 1: f56e8753-2ccb-3e94-8251-e1a2072186a8)
+  llama-8082:
+    <<: *llama-server
+    container_name: llama-server-8082
+    runtime: nvidia
+    restart: unless-stopped
+    mem_limit: 32g
+    memswap_limit: 36g
+    ports:
+      - "8082:8080"
+    volumes:
+      - /home/developer/models:/models:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["GPU-f56e8753-2ccb-3e94-8251-e1a2072186a8"]
+              capabilities: [gpu]
+    command: >
+      /usr/local/bin/llama-server
+      --model /models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Q4_0.gguf
+      --host 0.0.0.0
+      --port 8080
+      -ngl 999
+      -c 131072
+      -np 1
 
 volumes:
   postgres_data:
