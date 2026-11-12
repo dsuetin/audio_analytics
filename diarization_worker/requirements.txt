@@ -1,0 +1,19 @@
+# Зависимости сервиса streaming-diarization-worker.
+# Используется diarization_worker/Dockerfile (build context = diarization_worker/,
+# см. docker-compose.yml: streaming_diarization_worker).
+# Файл в корне проекта — НЕ для этого сервиса (он общий для storage_worker/vad-client).
+
+# Kafka (потребитель audio_events)
+aiokafka>=0.8.0
+# PostgreSQL
+asyncpg>=0.28.0
+# S3/MinIO (botocore устанавливается вместе с boto3)
+boto3>=1.28.0
+# gRPC / Triton
+grpcio>=1.50.0
+grpcio-tools>=1.50.0   # генерация output_pb2.py из diarization_protocol/output.proto при сборке
+tritonclient[all]>=2.30.0
+# protobuf runtime (output_pb2)
+protobuf>=4.21.0
+# аудио (int16-массивы, резка на 3000-мс ячейки)
+numpy>=1.24.0

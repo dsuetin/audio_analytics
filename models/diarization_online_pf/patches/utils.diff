@@ -1,0 +1,19 @@
+--- /tmp/opencode/audit_prod_model/utils.py	2026-04-22 17:48:26.000000000 +0300
++++ /tmp/opencode/utils_pf.py	2026-11-12 15:19:15.922616369 +0300
+@@ -136,7 +136,15 @@
+         adjusted_chunks.append(adjusted_chunk)
+         
+         # Increase the cumulative offset by the chunk duration in milliseconds.
+-        cumulative_offset += chunk_duration * 1000
++        # PF-патч: сдвигаем ТОЛЬКО для непустых чанков — как в
++        # adjust_all_chunks_cumulative (`if chunk:`). Пустые чанки (сигнальные
++        # PARTIAL/FULL: тишина + пустые vad_marks) НЕ сдвигают ни сегментный,
++        # ни mark-таймлайн → они остаются согласованными и
++        # check_and_adjust_interval клипит сегменты по истинным границам аудио.
++        # Для production-трафика (каждый чанк с непустыми marks) поведение
++        # не меняется.
++        if chunk:
++            cumulative_offset += chunk_duration * 1000
+     
+     return process_vad_results(adjusted_chunks)
+ 

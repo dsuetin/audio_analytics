@@ -2,7 +2,137 @@
 
 > Единый источник «какое состояние проекта сейчас» для OpenCode/агентов.
 > Обновлять в каждом рабочем сеансе. Детали задач — в `TODO.md`. Агентовый entry point — `AGENTS.md`.
-> Последнее обновление: 2026-11-07 (Partial Finalization Implementation + Diarization Replay Test Stand).
+> Последнее обновление: 2026-11-12 (PF-модель сохранена в репозитории + страница тестирования `/diarization-test` в stats_service; 30/30 проверок).
+
+## Итог сессии 2026-11-12 (PF-модель в репозитории + страница `/diarization-test`)
+
+**Задача:** сохранить проверенную PF-версию `diarization_online` в репо как
+воспроизводимый каталог модели; добавить ручную WAV-страницу `/diarization-test`
+в существующий `stats_service`. Без production-rollout, без использования
+PF-модели production-потоком.
+
+**Статус:** ✅ **ГОТОВО, 30/30 проверок** (реальный WAV, реальный Triton gRPC).
+Production-модель, production-контейнеры, PG/Kafka/S3 не тронуты (md5
+production-модели сверены до/после). Коммиты не делались (по требованию).
+
+**Состав:**
+
+- `models/diarization_online_pf/` — полный PF-код (md5 `83ac0723…`/`691da583…`
+  = тот код, что прошёл 9/9 и 49/49), `config.pbtxt` (только `name`),
+  `patches/*.diff`, `README.md`, `PATCH.md` (8 разделов), `CHECKSUMS.md`,
+  `MOUNT.md` (варианты A/B + откат), `scripts/prepare_model_dir.sh`
+  (копирование + md5-проверка);
+- `stats_service/diarization_test.py` — страница + backend: WAV→mono PCM
+  16 kHz (оригинал не меняется), paced gRPC-клиент (`async_stream_infer`,
+  один запрос в полёте), chunk→ACK→next, PARTIAL (`partial_finalization`,
+  состояние сохраняется) / FULL (`sequence_end`, sequence освобождается),
+  режимы PARTIAL none/each/5/10/20/manual/before_full, pause/resume,
+  cancel с sequence-cleanup, экспорты JSON/TXT/debug, результаты — только в
+  `REPORT_OUTPUT_DIR/diarization_test/`;
+- `stats_service/api.py` — guarded include (без gRPC-зависимостей сервис
+  работает, страница — 503 с инструкцией); `requirements.txt` + numpy,
+  grpcio, protobuf, tritonclient, packaging; `stats_service/diarization_protocol/`
+  (proto для бэкенда);
+- `scripts/test_diarization_page.py` — драйвер 30 проверок;
+- `reports/PF_MODEL_REPO_AND_TEST_PAGE_REPORT.md` — полный отчёт
+  (аудит, diff, checksums, mount, результаты, stop-точки, откат).
+
+**Подключение к Triton:** вариант A применён — `docker cp` +
+`triton_model_ctl.py load` (без перезапуска), `diarization_online_pf` в
+READY. Вариант B (персистентный volume mount) — **план, не выполнен**:
+требует recreate контейнера `server_triton-speech-segmentation` (stop A).
+Страница в production (:8000) — **не включена** (stop B: пересборка образа
+stats + recreate); сейчас работает на тестовом инстансе
+`daily-stats-api-test` (порт **8010**, URL `http://<host>:8010/diarization-test`).
+
+**Тесты:** FULL без PARTIAL (48 сегм., speakers 1–4), PARTIAL каждые 5
+(12 снапшотов, финал согласован), PARTIAL на каждый чанк (12), 2 ручных
+PARTIAL, стабильность ID (новые — последовательно, без переиспользования;
+юнит-логика `test_pf_mapping.py` ALL PASSED), FULL после PARTIAL, второй
+WAV, cleanup после FULL, ошибки (400/404/409), отмена с `sequence_cleaned`.
+Существующие страницы stats на :8010 — работают.
+
+**Бэкапы:** `backups/pf_model_repo_20261112_162516/` (api.py, requirements.txt,
+docker-compose.yml). Откат — в отчёте §8.
+
+---
+
+## Итог сессии 2026-11-12 (PARTIAL FINALIZATION по VAD-сессиям в streaming-diarization-worker)
+
+**Задача:** Интегрировать проверенный PARTIAL FINALIZATION (дизайн от 2026-11-07,
+`reports/PARTIAL_FINALIZATION_STATE_PRESERVATION_REPORT.md`, эксперимент 9/9) в production
+worker: PARTIAL на каждом конце VAD-сессии, JSONB на VAD-сессию в PostgreSQL, одна дневная
+sequence на магазин, состояние освобождается только дневным FULL.
+
+**Статус:** ✅ **ГОТОВО, изолированный тест пройден 49/49 проверок** (реальный Triton через
+shadow-модель + тестовая БД `streaming_diarization_test`). Production-контур, production-модель
+и production-таблицы НЕ тронуты. Функция за env-флагом `VAD_SESSION_PARTIAL_FINALIZATION`
+(по умолчанию **off** — production-поведение без флага не меняется, откат = убрать флаг).
+
+**Реализация:**
+
+- `diarization_worker/streaming_diarization_worker.py`: 1470 → 2395 строк; PF-ветка
+  `handle_event` (~20 `_pf_*`-методов), новые поля `StoreSession`/`VADSession`, recovery при
+  старте. `main.py` не тронут. Production-ветка `handle_event` без флага — без изменений.
+- Модель (только для теста): shadow `diarization_online_pf` — PF-патч `model_impl.py`
+  (speaker-refs эпохи + глобальный жадный косинус-матчинг, порог 0.75, PARTIAL сохраняет
+  состояние / FULL освобождает) + патч `utils.py` (пустые чанки не сдвигают mark-таймлайн).
+  Production `diarization_online` не изменена — md5 сверены до/после
+  (`model_impl.py` = `062975f6…`, `utils.py` = `846d1ded…`). Shadow-модель **удалена** из
+  контейнера после прогона.
+- PostgreSQL: новые таблицы `daily_diarization_state` + `vad_session_diarization`
+  (миграция `diarization_worker/migrations/001_vad_session_diarization.sql`) — применены
+  ТОЛЬКО к тестовой БД; тестовых данных в production-таблицах нет.
+- Детерминированный `triton_correlation_id = md5("date|store|epoch")[:8]`: новый epoch
+  (потеря непрерывности/рестарт) → новая sequence; старая sequence никогда не продолжается
+  молчаливо.
+- Recovery (все сценарии live-проверены на тестовой БД): рестарт worker'а (epoch+1 по всем
+  `active` дневным строкам + `identity_lost` по VAD-строкам), потеря непрерывности в полёте
+  (`PF:CONTINUITY_LOSS`), replay-идемпотентность (`PF:REPLAY_IGNORED`), PG-отказ
+  (`pf_pg_degraded` + догоняющий re-upsert), пустая сессия (`finalized_empty`), stale sequence.
+
+**Тест (Stage C/D/E, 2026-11-12 15:45 UTC):** 3 VAD-сессии (60.0 s + 60.0 s + 60.45 s,
+реальное аудио 180.45 s), 45 событий через реальный gRPC Triton:
+
+- модельный таймлайн 183 000 мс (61 × 3000 мс); до Stage D 64 запроса (61 ячейка + 3 PARTIAL),
+  после FULL 65;
+- 3 строки `vad_session_diarization` (15/17/18 сегментов), `status=finalized`, интервалы —
+  от начала VAD-сессии, перетекания за `audio_sent_ms` нет;
+- speaker-ID 1..4 **стабильны** между VAD-сессиями (один говорящий = один ID), новый говорящий
+  → новый ID; ID непрерывны и монотонны;
+- `daily_diarization_state`: 1 строка, `status=active` до FULL, `sent_audio_ms=180450`
+  (реальное аудио, без padding), correlation_id совпал с независимым md5-расчётом теста;
+- replay всех событий сессии 1 → `PF:REPLAY_IGNORED`, строки PG **byte-идентичны**;
+- FULL: VAD-строки → `finalized_full`, дневная → `finalized`, `diarization_results` — 1 строка
+  на 50 сегментов (15+17+18), сверка `absolute = vad_start_time + interval` — **0 расхождений**;
+  до FULL в `diarization_results` — 0 строк (как в production).
+
+**Requirements (запрос пользователя в ходе задачи):** сервис получил **собственный**
+`diarization_worker/requirements.txt` (aiokafka, asyncpg, boto3, grpcio, grpcio-tools,
+tritonclient[all], protobuf, numpy) — `Dockerfile` сервиса уже строился из него
+(build context = `diarization_worker/`). Корневой `requirements.txt` возвращён к закоммиченному
+виду (общий для storage_worker/vad-client). Конвенция: **у каждого сервиса — собственный
+requirements.txt внутри сервиса**, не в корне.
+
+**Бэкапы:** `backups/vad_session_integration_20261112_142339/` (worker + main ДО изменений).
+
+**Документация:** `reports/VAD_SESSION_PARTIAL_DIARIZATION_INTEGRATION_REPORT.md`
+(11 разделов, все заполнены; §8–9 — результаты прогона 49/49).
+
+**Состояние репо:** изменения **не закоммичены** (staged: `diarization_worker/requirements.txt`;
+modified: worker; новые: миграция, тест, отчёт).
+
+**Дальше (production-rollout — отдельный план, см. отчёт §11):**
+
+1. PF-патч production-модели `diarization_online` (изменение production Triton:
+   согласование + окно перезагрузки).
+2. Применение миграции к production-БД `streaming_diarization`.
+3. Флаг `VAD_SESSION_PARTIAL_FINALIZATION=true` в `docker-compose.yml` (откат = убрать флаг).
+4. Алерты: `PF:CONTINUITY_LOSS`, `PF:RECOVERY_AFTER_RESTART`, `PF:DAILY_STATE_SAVE_FAILED`,
+   `pf_pg_degraded`; мониторинг `status='identity_lost'`.
+5. A/B-валидация на реальном потоке (дневные `diarization_results` до/после + сверка VAD-строк).
+
+---
 
 ## Итог сессии 2026-11-07 (Partial Finalization + Diarization Replay Test Stand)
 

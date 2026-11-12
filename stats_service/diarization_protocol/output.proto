@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+message VoiceActivityMark {
+  enum VoiceActivityMarkType {
+    VA_MARK_NONE = 0;
+    VA_MARK_BEGIN = 1;
+    VA_MARK_END = 2;
+  }
+
+  VoiceActivityMarkType mark_type = 1;
+  uint32 offset_ms = 2;
+}
+
+message SpeakerSegment{
+ repeated VoiceActivityMark va_marks = 1;
+ uint32 speaker_id = 2;
+}
+
+message DiarisationResponse {
+  repeated SpeakerSegment speaker_segment = 1;
+}

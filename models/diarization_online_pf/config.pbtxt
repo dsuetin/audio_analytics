@@ -1,0 +1,84 @@
+name: "diarization_online_pf"
+backend: "python"
+max_batch_size: 1
+
+model_transaction_policy {
+  decoupled: true
+}
+sequence_batching {
+  max_sequence_idle_microseconds: 1000000000
+  oldest {
+    max_candidate_sequences: 1024
+    max_queue_delay_microseconds: 0
+  }
+}
+
+input [
+  {
+    name: "input"
+    data_type: TYPE_INT16
+    dims: [ -1 ]
+  },
+  {
+    name: "vad_marks"
+    data_type: TYPE_STRING
+    dims: [ -1 ]
+  },
+  {
+    name: "chunk_id"
+    data_type: TYPE_UINT16
+    dims: [ -1 ]
+  }
+]
+
+output [
+  {
+    name: "DiarisationResponse"
+    data_type: TYPE_STRING
+    dims: [
+      -1
+    ]
+  }
+]
+
+instance_group [
+    {
+      count: 1
+      kind: KIND_CPU
+    }
+]
+
+parameters [
+ {
+    key: "sample_rate"
+    value: { string_value: "16000" }
+ },
+ {
+    key: "window_fs"
+    value: { string_value: "1.52" }
+ },
+ {
+    key: "period_fs"
+    value: { string_value: "0.7" }
+ },
+ {
+    key: "frame_shift"
+    value: { string_value: "10" }
+ },
+ {
+    key: "max_speaker"
+    value: { string_value: "20" }
+ },
+ {
+    key: "num_speaker"
+    value: { string_value: "0" }
+ },
+ {
+    key: "use_audiogram_vad"
+    value: { string_value: "True" }
+ },
+ {
+  key: "EXECUTION_ENV_PATH"
+  value: {string_value: "/opt/tritonserver/speech-segmentation-conda-diarization-env.tar.gz"}
+ }
+]

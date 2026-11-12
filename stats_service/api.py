@@ -16,6 +16,29 @@ from stats_service.stores import get_all_stores, match_store_id, normalize_store
 
 app = FastAPI(title="Stats Service")
 
+# Страница тестирования PF-модели /diarization-test (отдельный модуль).
+# Guarded import: production-образ stats_service может не содержать
+# gRPC-зависимости (grpcio/tritonclient) — тогда страница отключается,
+# остальной сервис работает без изменений.
+try:
+    from stats_service import diarization_test as _diar_test
+
+    app.include_router(_diar_test.router)
+
+    @app.get("/diarization-test", response_class=HTMLResponse)
+    def _diar_test_page():
+        return _diar_test.render_page()
+
+except Exception as _diar_test_err:  # noqa: BLE001
+    @app.get("/diarization-test", response_class=HTMLResponse)
+    def _diar_test_unavailable():
+        return HTMLResponse(
+            "<h3>diarization-test</h3><p>Страница недоступна в этой сборке: "
+            + str(_diar_test_err) + ". Установите grpcio, tritonclient, "
+            "protobuf, numpy (stats_service/requirements.txt).</p>",
+            status_code=503,
+        )
+
 REPORT_DIR = Path(
     os.getenv(
         "REPORT_OUTPUT_DIR",

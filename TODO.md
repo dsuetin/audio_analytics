@@ -134,6 +134,36 @@
 - [ ] **LLM-nondeterminism**: ±1 dialog на одной дате (09-01: 17 vs 18).
   Зафиксировать канонический результат; GT-прогон как стабильный контрольный срез.
 
+- [x] **PARTIAL FINALIZATION по VAD-сессиям в streaming-diarization-worker (2026-11-12).**
+    PARTIAL на каждом конце VAD-сессии (состояние модели сохраняется, speaker-ID стабильны),
+    JSONB-строка на VAD-сессию (`vad_session_diarization`) + дневное состояние
+    (`daily_diarization_state`), одна дневная sequence на магазин, освобождение состояния —
+    только дневным FULL. Изолированный тест на реальном Triton (shadow-модель) + тестовой PG:
+    **49/49 проверок**, replay идемпотентен (`PF:REPLAY_IGNORED`), сверка
+    `absolute = vad_start_time + interval` — 0 расхождений, до FULL `diarization_results` пуст.
+    Функция за env-флагом `VAD_SESSION_PARTIAL_FINALIZATION` (default off).
+    Отчёт: `reports/VAD_SESSION_PARTIAL_DIARIZATION_INTEGRATION_REPORT.md`.
+    Файлы: `diarization_worker/streaming_diarization_worker.py` (1470→2395 строк),
+    `diarization_worker/migrations/001_vad_session_diarization.sql`,
+    `diarization_worker/tests/test_vad_session_partial_finalization.py`,
+    `diarization_worker/requirements.txt` (собственный файл сервиса).
+- [ ] **Production-rollout VAD-session PF (diarization).** По отчёту §11 (отдельный план +
+    согласование): (1) PF-патч production-модели `diarization_online` — окно перезагрузки
+    production Triton; (2) миграция в production-БД `streaming_diarization`;
+    (3) флаг `VAD_SESSION_PARTIAL_FINALIZATION=true` в `docker-compose.yml`
+    (откат = убрать флаг); (4) алерты `PF:CONTINUITY_LOSS` / `PF:RECOVERY_AFTER_RESTART` /
+    `PF:DAILY_STATE_SAVE_FAILED` / `pf_pg_degraded` + мониторинг `identity_lost`;
+    (5) A/B-валидация на реальном потоке (дневные `diarization_results` до/после,
+    сверка VAD-строк с дневным результатом).
+- [ ] **PF-тест-страница: персистентность + production (stop A/B, 2026-11-12).**
+    (A) персистентный volume mount `models/diarization_online_pf` в Triton
+    (compose + recreate контейнера `server_triton-speech-segmentation`) — план в
+    `models/diarization_online_pf/MOUNT.md`; пока модель грузится `docker cp` + gRPC
+    (перезагружается после рестарта контейнера). (B) включение страницы в production
+    stats (:8000) — пересборка образа stats_service с новыми requirements + recreate
+    контейнера; пока страница работает только на `daily-stats-api-test` (:8010).
+    Оба пункта — только после согласования; отчёт §7.
+
 ## P2 (позже — детали и косметика)
 
 - [ ] Остальные классификационные детали (loss_reason, тонкости role/mission) и
@@ -149,6 +179,16 @@
 
 ## DONE (история, не активные)
 
+- [x] **PF-модель в репозитории + страница `/diarization-test` (2026-11-12).**
+    `models/diarization_online_pf/` — воспроизводимый каталог модели (код md5 `83ac0723…`/
+    `691da583…`, diff'ы в `patches/`, PATCH.md/README/CHECKSUMS/MOUNT.md,
+    `scripts/prepare_model_dir.sh`). Страница в `stats_service`
+    (`stats_service/diarization_test.py` + guarded include в `api.py`): WAV→PCM 16 kHz mono,
+    paced gRPC-клиент, PARTIAL/FULL, pause/resume/cancel, экспорты. Тесты — **30/30**
+    (реальный WAV, реальный Triton; драйвер `scripts/test_diarization_page.py`).
+    Подключение: `docker cp` + gRPC load (вариант A, без перезапуска); модель в READY.
+    Production не тронут (md5 production-модели сверены до/после; :8000 не пересобирался).
+    Отчёт: `reports/PF_MODEL_REPO_AND_TEST_PAGE_REPORT.md`.
 - [x] **LLM-based segment merging (2026-10-23):** реализован новый модуль `segment_merge_llm.py` для
   определения принадлежности соседних сегментов к одному диалогу с помощью LLM:
   - Промпт анализирует тексты двух сегментов и принимает решение об объединении

@@ -1,0 +1,264 @@
+--- audit_prod_model/model_impl.py	2026-05-19 19:02:40.000000000 +0300
++++ model_impl_pf.py	2026-11-12 14:47:50.937725253 +0300
+@@ -24,6 +24,86 @@
+ MARK_END = 2
+ ASR_MAX = 30000 # ASR MAX CAPABLE INPUT SIZE IN MS
+ 
++# PF-патч: partial finalization с сохранением состояния + стабильные speaker ID.
++# PF:PARTIAL — вернуть полный накопленный снапшот, состояние НЕ освобождается.
++# PF:FULL (sequence_end) — финальный результат, состояние освобождается.
++PF_MATCH_THRESHOLD = 0.75  # мин. косинус для перематча raw-кластера на сохранённый reference
++PF_REF_ALPHA = 0.5         # скользящее среднее при обновлении reference-центроида
++
++
++def pf_normalize(vec):
++    """L2-нормализация вектора (нулевой вектор возвращается как есть)."""
++    nrm = np.linalg.norm(vec)
++    if nrm < 1e-9:
++        return vec
++    return vec / nrm
++
++
++def pf_stable_speaker_mapping(raw_centroids, refs,
++                              threshold=PF_MATCH_THRESHOLD, alpha=PF_REF_ALPHA):
++    """
++    Глобальный жадный попарный маппинг raw-кластеров на сохранённые reference-центроиды.
++
++    Args:
++        raw_centroids: dict raw_label(int) -> нормализованный центроид (ndarray 256-d)
++        refs:          dict stable_id(int) -> нормализованный reference-центроид (ndarray 256-d)
++
++    Returns:
++        (stable_map, refs_updated, matches, new_ids)
++        stable_map:   dict raw_label -> stable_id (все raw-кластеры получают id)
++        refs_updated: обновлённые references (скользящее среднее по совпавшим парам)
++        matches:      list (raw_label, stable_id, cos) — перематчи
++        new_ids:      list (raw_label, new_stable_id) — новые speakers
++    """
++    refs_updated = {sid: np.array(ref, copy=True) for sid, ref in refs.items()}
++    stable_map = {}
++    matches = []
++    new_ids = []
++
++    # Все пары (raw, ref) с косинусом, отсортированы по убыванию — глобальная жадность
++    pairs = []
++    for raw, c in raw_centroids.items():
++        c_n = pf_normalize(np.asarray(c, dtype=np.float64))
++        if np.linalg.norm(c_n) < 1e-9:
++            continue
++        for sid, r in refs.items():
++            r_n = pf_normalize(np.asarray(r, dtype=np.float64))
++            if np.linalg.norm(r_n) < 1e-9:
++                continue
++            cos = float(np.dot(c_n, r_n))
++            if cos >= threshold:
++                pairs.append((cos, int(raw), int(sid)))
++    pairs.sort(key=lambda t: t[0], reverse=True)
++
++    used_raw = set()
++    used_ref = set()
++    for cos, raw, sid in pairs:
++        if raw in used_raw or sid in used_ref:
++            continue
++        stable_map[raw] = sid
++        used_raw.add(raw)
++        used_ref.add(sid)
++        matches.append((raw, sid, cos))
++
++    # Несовпавшие raw-кластеры получают новые id (max+1, по возрастанию raw-метки — детерминированно);
++    # их центроиды сохраняются как новые references
++    next_id = (max(refs.keys()) + 1) if refs else 1
++    for raw in sorted(raw_centroids.keys()):
++        if raw in stable_map:
++            continue
++        stable_map[int(raw)] = next_id
++        new_ids.append((int(raw), next_id))
++        refs_updated[next_id] = pf_normalize(np.asarray(raw_centroids[raw], dtype=np.float64))
++        next_id += 1
++
++    # Обновление references скользящим средним по совпавшим парам
++    for raw, sid, cos in matches:
++        c_n = pf_normalize(np.asarray(raw_centroids[raw], dtype=np.float64))
++        r_n = pf_normalize(np.asarray(refs_updated[sid], dtype=np.float64))
++        refs_updated[sid] = pf_normalize(alpha * c_n + (1.0 - alpha) * r_n)
++
++    return stable_map, refs_updated, matches, new_ids
++
+ try:
+     VAD_TYPE = int(os.environ.get('DIARIZATION_VAD_TYPE', '2'))
+ except:
+@@ -83,6 +163,9 @@
+         #self.sequence_id_vad_audiogram = {} # dict for saving audiogram vad results for every sequence chunks
+         self.sequence_id_vad_mark_audiogram = {} # dict for saving audiogram vad results for every sequence chunks
+ 
++        # PF-патч: corrid -> {stable_id: нормализованный reference-центроид 256-d}
++        self.sequence_id_speaker_refs = {}
++
+         self.sequence_id_last_update = {}
+         
+         self.sequence_id_pyannet_state = {}  # dict for saving pyannet state for every sequence chunks
+@@ -116,6 +199,10 @@
+                 if seq_id in self.sequence_id_embeddings:
+                     del self.sequence_id_embeddings[seq_id]
+ 
++                # PF-патч: вместе с состоянием удаляем и speaker references
++                if seq_id in self.sequence_id_speaker_refs:
++                    del self.sequence_id_speaker_refs[seq_id]
++
+                 del self.sequence_id_last_update[seq_id]
+ 
+                 if self.true_online and seq_id in self.sequence_id_pyannet_state:
+@@ -271,19 +358,25 @@
+             sample_rate = int(params.get("sample_rate", f"{self.sample_rate}"))
+             max_speaker = int(params.get("max_speaker", f"{self.max_speaker}"))
+             num_speaker = int(params.get("num_speaker", f"{self.num_speaker}"))
+-            
++
+             max_speaker_b.append([max_speaker])
+             num_speaker_b.append([num_speaker])
+             # Switched from config sequence control to the code
+             start_signal = bool(request.flags() & pb_utils.TRITONSERVER_REQUEST_FLAG_SEQUENCE_START)
+-            end_signal = bool(request.flags() & pb_utils.TRITONSERVER_REQUEST_FLAG_SEQUENCE_END) 
++            end_signal = bool(request.flags() & pb_utils.TRITONSERVER_REQUEST_FLAG_SEQUENCE_END)
+             corrid = request.correlation_id()
+ 
++            # PF-патч: partial finalization — вернуть накопленный снапшот, сохранив состояние
++            partial_finalization = str(params.get("partial_finalization", "False")).strip().lower() == "true"
++            do_finalize = end_signal or (partial_finalization and not end_signal)
++
+             if start_signal == True:
+                 self.sequence_id_embeddings[corrid] = {}
+                 self.sequence_id_vad[corrid] = {}
+                 #self.sequence_id_vad_audiogram[corrid] = {}
+                 self.sequence_id_vad_mark_audiogram[corrid] = {}
++                # PF-патч: reference-центроиды стабильных speaker ID для sequence
++                self.sequence_id_speaker_refs[corrid] = {}
+                 if self.true_online:
+                     self.sequence_id_pyannet_state[corrid] = utils.PyannetState()
+                     self.sequence_id_wav[corrid] = torch.zeros((0,), dtype=torch.float16, device=self.device)
+@@ -396,7 +489,7 @@
+ 
+         self.sequence_id_last_update[corrid] = time.time()
+ 
+-        if end_signal == True:
++        if do_finalize:
+             sorted_chunks = sorted(self.sequence_id_vad[corrid].keys())
+             # Create a list of the values in sorted order
+             all_chunks = [self.sequence_id_vad[corrid][cid] for cid in sorted_chunks]
+@@ -427,13 +520,12 @@
+ 
+         response_sender = request.get_response_sender()
+ 
+-        if end_signal == True:
+-            if end_signal == True:
+-                flattened_list = []
+-                # Sort the chunk_ids to maintain order (assumes chunk_id keys can be sorted numerically or lexically)
+-                for cid in sorted(self.sequence_id_embeddings[corrid].keys()):
+-                        flattened_list.extend(self.sequence_id_embeddings[corrid][cid])
+-                out_embds = [flattened_list]
++        if do_finalize:
++            flattened_list = []
++            # Sort the chunk_ids to maintain order (assumes chunk_id keys can be sorted numerically or lexically)
++            for cid in sorted(self.sequence_id_embeddings[corrid].keys()):
++                    flattened_list.extend(self.sequence_id_embeddings[corrid][cid])
++            out_embds = [flattened_list]
+ 
+             for i, embd in enumerate(out_embds):
+                 if embd:  # Check if embd is not empty
+@@ -484,6 +576,38 @@
+                     rttm = utils.merge_segments(utt_to_subseg_labels)
+                     if len(rttm) > 0:
+                         results.append(rttm)
++
++            # PF-патч: стабильные speaker ID.
++            # Центроид каждого raw-кластера (по ВСЕМ эмбеддингам sequence) перематчивается
++            # на сохранённые reference-центроиды; совпавшие получают старый stable_id,
++            # новые speakers получают max(id)+1. References обновляются скользящим средним.
++            stable_map = {}
++            refs = self.sequence_id_speaker_refs.get(corrid, {})
++            raw_centroids = {}
++            if out_embds and i > 0:
++                emb_list = out_embds[0]
++                try:
++                    labels_all = np.asarray(result, dtype=np.int64)
++                    if len(labels_all) == len(emb_list):
++                        for lab in np.unique(labels_all):
++                            idx = np.where(labels_all == lab)[0]
++                            vec = np.mean(
++                                np.stack([np.asarray(emb_list[j], dtype=np.float64) for j in idx]),
++                                axis=0)
++                            raw_centroids[int(lab)] = pf_normalize(vec)
++                        stable_map, self.sequence_id_speaker_refs[corrid], pf_matches, pf_new_ids = \
++                            pf_stable_speaker_mapping(raw_centroids, refs)
++                        logging.info(
++                            f"PF:FINALIZE corrid={corrid} embeddings={len(emb_list)} "
++                            f"refs_before={sorted(refs.keys())} "
++                            f"refs_after={sorted(self.sequence_id_speaker_refs[corrid].keys())} "
++                            f"matches={[(r, s, round(c, 4)) for r, s, c in pf_matches]} "
++                            f"new_speakers={pf_new_ids}")
++                except Exception as e:
++                    logging.warning(
++                        f"PF:FINALIZE corrid={corrid} stable mapping failed: {e}. Falling back to raw labels")
++                    stable_map = {}
++
+             # Return the batched resoponse
+             st = 0
+             for b in batch_count:
+@@ -512,12 +636,16 @@
+                                     adjusted_interval = utils.check_and_adjust_interval(audiogram_vad_marks, raw_interval)
+                                     splitted_adjusted_intervals = utils.split_intervals(adjusted_interval, max_interval=ASR_MAX)
+                                     for start, end in splitted_adjusted_intervals:
+-                                        results_chechked_splitted.append([start, end, int(segment[2]) + 1])
++                                        # PF-патч: стабильный speaker ID вместо пересчёта raw-метки
++                                        results_chechked_splitted.append(
++                                            [start, end, stable_map.get(int(segment[2]), int(segment[2]) + 1)])
+                                 else:
+                                     start_ms = int(segment[0] * 1000)
+                                     end_ms = int(segment[1] * 1000)
+                                     for start, end in utils.split_intervals((start_ms, end_ms), max_interval=ASR_MAX):
+-                                        results_chechked_splitted.append([start, end, int(segment[2]) + 1])
++                                        # PF-патч: стабильный speaker ID вместо пересчёта raw-метки
++                                        results_chechked_splitted.append(
++                                            [start, end, stable_map.get(int(segment[2]), int(segment[2]) + 1)])
+                                 
+                     final_merged_results = utils.merge_speaker_segments(results_chechked_splitted)
+                     final_merged_results = utils.split_intervals_with_speaker(final_merged_results, max_interval=ASR_MAX)
+@@ -548,15 +676,29 @@
+             inf_time = round(end_cls_time - vad_start_time, 3) or 0.01
+             logging.info(f"Diarization         | Process {corrid} sequence {chunk_id} chunk {round(cur_len_sec, 2)} sec. in {inf_time} sec. RTF: {round(cur_len_sec/inf_time)}")
+ 
+-            del self.sequence_id_embeddings[corrid]
+-            del self.sequence_id_vad[corrid]
+-            #del self.sequence_id_vad_audiogram[corrid]
+-            del self.sequence_id_vad_mark_audiogram[corrid]
+-            del self.sequence_id_last_update[corrid]
+-            if self.true_online:
+-                del self.sequence_id_pyannet_state[corrid]
+-                del self.sequence_id_wav[corrid]
+-
++            # PF-патч: FULL (sequence_end) — освобождение состояния и references;
++            # PARTIAL — полный снапшот возвращён, состояние (embeddings, chunk-состояние,
++            # references, стабильные ID) СОХРАНЯЕТСЯ до FULL.
++            if end_signal:
++                del self.sequence_id_embeddings[corrid]
++                del self.sequence_id_vad[corrid]
++                #del self.sequence_id_vad_audiogram[corrid]
++                del self.sequence_id_vad_mark_audiogram[corrid]
++                del self.sequence_id_last_update[corrid]
++                if self.true_online:
++                    del self.sequence_id_pyannet_state[corrid]
++                    del self.sequence_id_wav[corrid]
++                if corrid in self.sequence_id_speaker_refs:
++                    del self.sequence_id_speaker_refs[corrid]
++                logging.info(
++                    f"PF:FULL corrid={corrid} state RELEASED "
++                    f"n_segments_returned={len(final_merged_results)}")
++            else:
++                logging.info(
++                    f"PF:PARTIAL corrid={corrid} state PRESERVED "
++                    f"chunks={len(self.sequence_id_vad[corrid])} "
++                    f"speaker_refs={sorted(self.sequence_id_speaker_refs.get(corrid, {}).keys())} "
++                    f"n_segments_returned={len(final_merged_results)}")
+ 
+             response_sender.send(inference_response,flags=pb_utils.TRITONSERVER_RESPONSE_COMPLETE_FINAL)
+         else:
