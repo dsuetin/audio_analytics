@@ -611,7 +611,7 @@ services:
       --host 0.0.0.0
       --port 8080
       -ngl 999
-      -c 131072
+      -c 1048576
       -np 1
 
 volumes:
